@@ -108,9 +108,11 @@ async function updateTrending() {
 // (Now called inside startServer after listen)
 setInterval(updateTrending, 12 * 60 * 60 * 1000);
 
-async function startServer() {
+let appInstance: express.Express | null = null;
+
+async function createApp() {
+  if (appInstance) return appInstance;
   const app = express();
-  const PORT = 3000;
 
   app.use(cors());
   app.use(express.json());
@@ -681,14 +683,16 @@ async function startServer() {
     });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  const isVercel = process.env.VERCEL === "1";
+
+  // Vite middleware for local development only (not serverless)
+  if (process.env.NODE_ENV !== "production" && !isVercel) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!isVercel) {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -696,14 +700,28 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    
-    // Kick off trending update after server is listening
+  appInstance = app;
+  if (trendingCache.length === 0) {
     updateTrending();
+  }
+  return app;
+}
+
+async function startServer() {
+  const app = await createApp();
+  const PORT = Number(process.env.PORT || 3000);
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-});
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error("Failed to start server:", err);
+  });
+}
+
+export default async function handler(req: express.Request, res: express.Response) {
+  const app = await createApp();
+  return app(req, res);
+}
