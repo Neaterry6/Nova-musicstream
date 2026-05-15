@@ -77,7 +77,6 @@ import {
   getDocs
 } from "firebase/firestore";
 import { get, set, del, keys } from "idb-keyval";
-import { GoogleGenAI, Modality } from "@google/genai";
 
 // --- Types ---
 interface Track {
@@ -145,7 +144,29 @@ export default function App() {
   const [quality, setQuality] = useState("320kbps");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
   const audioRef = React.useRef<HTMLAudioElement>(null);
+
+  // Offline URL Loader
+  useEffect(() => {
+    if (currentTrack?.isOffline) {
+      get(`track_${currentTrack.id}`).then(data => {
+        if (data && data.blob) {
+          if (offlineUrl) URL.revokeObjectURL(offlineUrl);
+          setOfflineUrl(URL.createObjectURL(data.blob));
+        } else {
+          setErrorMessage("Offline track data missing.");
+          setOfflineUrl(null);
+        }
+      }).catch(err => {
+        console.error("Failed to load offline track", err);
+        setOfflineUrl(null);
+      });
+    } else {
+      if (offlineUrl) URL.revokeObjectURL(offlineUrl);
+      setOfflineUrl(null);
+    }
+  }, [currentTrack]);
 
   // Auto-hide error
 
@@ -208,10 +229,22 @@ export default function App() {
       setInstallPrompt(e);
     });
 
-    fetch("/api/daily-pick")
-      .then(res => res.ok ? res.json() : null)
-      .then(data => data && setDailyPick(data))
-      .catch(err => console.error("Daily pick fetch failed", err));
+    const fetchDailyPick = async (retries = 3) => {
+      try {
+        const res = await fetch("/api/daily-pick");
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const data = await res.json();
+        if (data) setDailyPick(data);
+      } catch (err) {
+        console.error("Daily pick fetch failed", err);
+        if (retries > 0) {
+          console.log(`Retrying daily pick fetch... (${retries} left)`);
+          setTimeout(() => fetchDailyPick(retries - 1), 2000);
+        }
+      }
+    };
+
+    fetchDailyPick();
     
     const savedHistory = localStorage.getItem("music_history");
     if (savedHistory) setHistory(JSON.parse(savedHistory));
@@ -346,7 +379,7 @@ export default function App() {
 
   // Trending Loader
   useEffect(() => {
-    const fetchTrending = async () => {
+    const fetchTrending = async (retries = 3) => {
       try {
         const res = await fetch("/api/trending");
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -356,10 +389,14 @@ export default function App() {
         }
       } catch (err) {
         console.error("Failed to fetch trending", err);
+        if (retries > 0) {
+          console.log(`Retrying trending fetch... (${retries} left)`);
+          setTimeout(() => fetchTrending(retries - 1), 2000);
+        }
       }
     };
     fetchTrending();
-    const interval = setInterval(fetchTrending, 5 * 60 * 1000);
+    const interval = setInterval(() => fetchTrending(0), 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -922,10 +959,10 @@ export default function App() {
                             <div className="flex items-center gap-6">
                                <p className="text-white/40 font-black italic text-xl uppercase tracking-tighter">{selectedAlbum.author}</p>
                                <div className="w-1 h-1 bg-white/20 rounded-full" />
-                               <p className="text-white/40 font-black text-xs uppercase tracking-widest">{selectedAlbum.tracks.length} Songs</p>
+                               <p className="text-white/40 font-black text-xs uppercase tracking-widest">{(selectedAlbum.tracks || []).length} Songs</p>
                             </div>
                             <div className="flex gap-4 pt-4">
-                               <button onClick={() => { setCurrentTrack(selectedAlbum.tracks[0]); setIsPlaying(true); }} className="px-10 py-4 mixed-gradient rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-3">
+                               <button onClick={() => { if (selectedAlbum.tracks?.[0]) { setCurrentTrack(selectedAlbum.tracks[0]); setIsPlaying(true); } }} className="px-10 py-4 mixed-gradient rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-3">
                                   <Play fill="white" stroke="none" size={16} /> Stream Album
                                </button>
                                <button onClick={() => setActiveTab("trending")} className="px-10 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-black uppercase tracking-widest text-xs border border-white/10 text-white/60">Back</button>
@@ -934,7 +971,7 @@ export default function App() {
                       </div>
 
                       <div className="space-y-3">
-                         {selectedAlbum.tracks.map((track: any, i: number) => (
+                         {(selectedAlbum.tracks || []).map((track: any, i: number) => (
                            <div 
                              key={track.id} 
                              onClick={() => { setCurrentTrack(track); setIsPlaying(true); }}
@@ -1242,7 +1279,7 @@ export default function App() {
 
         <audio 
           ref={audioRef}
-          src={currentTrack ? (currentTrack.isOffline ? URL.createObjectURL((get(`track_${currentTrack.id}`) as any).blob) : `/api/stream?url=${encodeURIComponent(currentTrack.url)}`) : undefined}
+          src={currentTrack ? (currentTrack.isOffline ? (offlineUrl || undefined) : `/api/stream?url=${encodeURIComponent(currentTrack.url)}`) : undefined}
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onEnded={playNext}
@@ -1452,9 +1489,9 @@ const AdminPanel = () => {
   const [admins, setAdmins] = useState<any[]>([]);
   const [newAdminEmail, setNewAdminEmail] = useState("");
   const [users, setUsers] = useState<any[]>([
-    { id: 1, name: "John Doe", email: "john@nova.com", plan: "Premium", joinDate: "2024-05-01" },
-    { id: 2, name: "Jane Smith", email: "jane@nova.com", plan: "Free", joinDate: "2024-05-10" },
-    { id: 3, name: "Alex Ross", email: "alex@nova.com", plan: "Premium", joinDate: "2024-05-12" },
+    { id: 1, name: "John Doe", email: "john@nova.com", plan: "Premium", joinDate: "2026-05-01" },
+    { id: 2, name: "Jane Smith", email: "jane@nova.com", plan: "Free", joinDate: "2026-05-10" },
+    { id: 3, name: "Alex Ross", email: "alex@nova.com", plan: "Premium", joinDate: "2026-05-12" },
   ]);
 
   useEffect(() => {
@@ -1703,7 +1740,7 @@ const VideosView = ({ onPlay, onDownload }: any) => {
         <div className="w-12 h-12 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-500"><VideoIcon size={24} /></div>
         <div>
           <h3 className="text-3xl font-black italic tracking-tighter uppercase leading-none">Trending Visuals</h3>
-          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Viral Music Videos 2024</p>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Viral Music Videos 2026</p>
         </div>
       </div>
 
@@ -1761,7 +1798,7 @@ const ShazamView = ({ onPlay }: any) => {
         setResult(data.result);
       } else {
         if (data.status === "error") {
-          setError(`AudD Error: ${data.error?.message || "Unknown error"}`);
+          setError(`AudD Error: ${data.error?.error_message || data.error?.message || "Unknown error"}`);
         } else {
           setError("No match found. Ensure the original music is loud and clear.");
         }
@@ -1786,23 +1823,24 @@ const ShazamView = ({ onPlay }: any) => {
       mediaRecorder.current.onstop = async () => {
         const audioBlob = new Blob(audioChunks.current, { type: mediaRecorder.current?.mimeType || 'audio/webm' });
         setIsRecording(false);
-        console.log("Recording stopped, blob size:", audioBlob.size, "mime:", audioBlob.type);
-        if (audioBlob.size < 5000) {
-          setError("Recorded audio is too short. Please record at least 5-10 seconds.");
+        console.log("Recording stopped, chunks:", audioChunks.current.length, "blob size:", audioBlob.size, "mime:", audioBlob.type);
+        if (audioBlob.size < 10000) {
+          setError("Recorded audio is too short or silent. Please record at least 10-15 seconds of clear music.");
           return;
         }
+        setIdentifying(true);
         identifyBlob(audioBlob);
       };
 
-      mediaRecorder.current.start();
+      mediaRecorder.current.start(1000); // Pulse every 1s to ensure data flows
       setIsRecording(true);
-      // Record for 12 seconds for better identification
+      // Record for 15 seconds for better identification
       setTimeout(() => {
         if (mediaRecorder.current?.state === "recording") {
           mediaRecorder.current.stop();
           stream.getTracks().forEach(t => t.stop());
         }
-      }, 12000);
+      }, 15000);
     } catch (err) {
       setError("Microphone access denied.");
     }

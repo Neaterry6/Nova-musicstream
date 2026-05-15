@@ -86,7 +86,7 @@ async function updateTrending() {
 }
 
 // Initial update and every 12 hours
-updateTrending();
+// (Now called inside startServer after listen)
 setInterval(updateTrending, 12 * 60 * 60 * 1000);
 
 async function startServer() {
@@ -232,7 +232,7 @@ async function startServer() {
 
   app.get("/api/videos/trending", async (req, res) => {
     try {
-      const results = await ytSearch("trending music videos 2024");
+      const results = await ytSearch("trending music videos 2026");
       const videos = results.videos.slice(0, 20).map(v => ({
         id: v.videoId,
         title: v.title,
@@ -249,24 +249,30 @@ async function startServer() {
   });
 
   app.post("/api/shazam", express.raw({ type: "*/*", limit: "15mb" }), async (req, res) => {
-    const AUDD_TOKEN = '45a9639dc5f736027983b959b0776287';
+    const AUDD_TOKEN = process.env.AUDD_TOKEN || '45a9639dc5f736027983b959b0776287';
     try {
       if (!req.body || req.body.length === 0) {
+        console.error("Shazam error: Empty request body received");
         return res.status(400).json({ error: "Empty request body" });
       }
+
+      console.log(`Shazam request received: ${req.body.length} bytes`);
 
       const form = new FormData();
       form.append('api_token', AUDD_TOKEN);
       form.append('return', 'apple_music,spotify');
-      // Pass the buffer as a file with a generic name, Audd handles various formats
-      form.append('file', req.body, { filename: 'audio.bin' });
+      // Pass the buffer as a file with a recognizable extension
+      form.append('file', req.body, { filename: 'audio.ogg' });
 
       const { data } = await axios.post('https://api.audd.io/', form, {
         headers: form.getHeaders(),
-        timeout: 60000
+        timeout: 120000
       });
 
-      console.log("Shazam API response:", data);
+      console.log("Shazam API response received:", data.status || "success");
+      if (data.status === "error") {
+        console.error("Audd.io error details:", JSON.stringify(data.error, null, 2));
+      }
       res.json(data);
     } catch (err) {
       console.error("Shazam API Error:", err);
@@ -291,9 +297,37 @@ async function startServer() {
   app.get("/api/album/:id", async (req, res) => {
     const { id } = req.params;
     try {
+      // If the ID is a numeric Deezer ID, use Deezer API
+      if (/^\d+$/.test(id)) {
+        const dzRes = await axios.get(`https://api.deezer.com/album/${id}`);
+        const data = dzRes.data;
+        if (data.error) {
+          return res.status(404).json({ tracks: [], error: "Album not found on Deezer" });
+        }
+        
+        const tracks = (data.tracks?.data || []).map((t: any) => ({
+          id: t.id,
+          title: t.title,
+          thumbnail: data.cover_medium,
+          duration: t.duration,
+          author: t.artist.name,
+          url: `https://www.youtube.com/results?search_query=${encodeURIComponent(t.artist.name + ' ' + t.title + ' official audio')}`,
+          type: "track"
+        }));
+
+        return res.json({
+          id,
+          title: data.title,
+          thumbnail: data.cover_medium,
+          author: data.artist.name,
+          tracks
+        });
+      }
+
+      // Otherwise assume it's a YouTube listId
       const results = await ytSearch({ listId: id });
       if (!results || !results.videos) {
-        return res.status(404).json({ error: "Album not found" });
+        return res.status(404).json({ tracks: [], error: "Album not found" });
       }
       const tracks = results.videos.map(v => ({
         id: v.videoId,
@@ -315,6 +349,7 @@ async function startServer() {
       console.error("Album API error:", err);
       // Ensure we always return JSON, even on error
       res.status(500).json({ 
+        tracks: [],
         error: "Failed to fetch album tracks",
         message: err instanceof Error ? err.message : "Unknown error"
       });
@@ -338,12 +373,26 @@ async function startServer() {
       const info = await ytdl.getInfo(url, options);
       res.json({
         title: info.videoDetails.title,
-        thumbnail: info.videoDetails.thumbnails[0].url,
+        thumbnail: info.videoDetails.thumbnails[0].url || (info.videoDetails.thumbnails.length > 0 ? info.videoDetails.thumbnails[0].url : ""),
         duration: info.videoDetails.lengthSeconds,
         author: info.videoDetails.author.name,
       });
     } catch (error) {
-      console.error("Error fetching video info:", error);
+      console.error("Error fetching video info with ytdl, trying yt-search fallback:", error);
+      try {
+        const searchResults = await ytSearch(url);
+        if (searchResults.videos.length > 0) {
+          const v = searchResults.videos[0];
+          return res.json({
+            title: v.title,
+            thumbnail: v.thumbnail,
+            duration: v.seconds,
+            author: v.author.name,
+          });
+        }
+      } catch (e) {
+        console.error("Info fallback failed:", e);
+      }
       res.status(500).json({ error: "Failed to fetch video info" });
     }
   });
@@ -397,27 +446,12 @@ async function startServer() {
     } catch (error) {
       console.error("YTDL download failed, trying fallback...", error);
       
-      try {
-        // Fallback 1: Priyanshi API
-        const fallbackRes = await axios.get(`https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`, { timeout: 30000 });
-        let downloadUrl = format === 'mp3' ? (fallbackRes.data.data?.high || fallbackRes.data.data?.low) : (fallbackRes.data.data?.video || fallbackRes.data.data?.url);
-        
-        if (!downloadUrl) {
-          // Fallback 2: Prexzyvilla API
-          const fallbackRes2 = await axios.get(`https://apis.prexzyvilla.site/download/aio?url=${encodeURIComponent(url)}`, { timeout: 30000 });
-          const data = fallbackRes2.data?.result || fallbackRes2.data?.data || fallbackRes2.data;
-          downloadUrl = format === 'mp3' ? (data.high || data.low || data.url) : (data.video || data.high || data.url);
-        }
-
-        if (downloadUrl) {
-           const stream = await axios.get(downloadUrl, { responseType: 'stream' });
-           if (format === "mp3") res.header("Content-Type", "audio/mpeg");
-           else res.header("Content-Type", "video/mp4");
-           res.header("Content-Disposition", `attachment; filename="download.${format}"`);
-           return stream.data.pipe(res);
-        }
-      } catch (fallbackError) {
-        console.error("All download fallback layers failed", fallbackError);
+      const fallbackUrl = await getFallbackStreamUrl(url);
+      if (fallbackUrl) {
+         if (format === "mp3") res.header("Content-Type", "audio/mpeg");
+         else res.header("Content-Type", "video/mp4");
+         res.header("Content-Disposition", `attachment; filename="download.${format}"`);
+         return proxyStream(fallbackUrl, res);
       }
 
       res.status(500).json({ error: "Download failed. YouTube's bot detection might be blocking this request." });
@@ -458,28 +492,106 @@ async function startServer() {
 
     try {
       res.setHeader("Content-Type", "audio/mpeg");
-      ytdl(url, ytdlOptions)
-        .on('error', (err) => {
-          console.error("YTDL Stream Error:", err);
-        })
-        .pipe(res);
+      const stream = ytdl(url, ytdlOptions);
+      
+      stream.on('error', async (err: any) => {
+        console.error("YTDL Stream Error:", err);
+        if (!res.headersSent) {
+          const fallbackUrl = await getFallbackStreamUrl(url);
+          if (fallbackUrl) {
+            return proxyStream(fallbackUrl, res);
+          }
+          res.status(500).json({ error: "Streaming failed after error" });
+        } else {
+          res.end();
+        }
+      });
+
+      stream.pipe(res);
     } catch (err) {
       console.error("YTDL outer catch:", err);
-      
-      // Fallback for streaming
-      try {
-        const fallbackRes = await axios.get(`https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`, { timeout: 15000 });
-        const streamUrl = fallbackRes.data.data?.high || fallbackRes.data.data?.low;
-        if (streamUrl) {
-          const stream = await axios.get(streamUrl, { responseType: 'stream' });
-          res.setHeader("Content-Type", "audio/mpeg");
-          return stream.data.pipe(res);
-        }
-      } catch (e) {}
-
+      const fallbackUrl = await getFallbackStreamUrl(url);
+      if (fallbackUrl) {
+        return proxyStream(fallbackUrl, res);
+      }
       res.status(500).json({ error: "Streaming failed" });
     }
   });
+
+  async function getFallbackStreamUrl(url: string) {
+    try {
+      console.log("Attempting fallbacks for:", url);
+      // Try multiple fallback sources
+      const sources = [
+        `https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`,
+        `https://apis.prexzyvilla.site/download/aio?url=${encodeURIComponent(url)}`,
+        `https://api.cobalt.tools/api/json` 
+      ];
+
+      for (const src of sources) {
+        try {
+          if (src.includes("cobalt")) {
+             const cRes = await axios.post(src, { url, downloadMode: 'audio' }, { headers: { 'Accept': 'application/json' }, timeout: 10000 });
+             if (cRes.data?.url) return cRes.data.url;
+             continue;
+          }
+          
+          const res = await axios.get(src, { timeout: 15000 });
+          const data = res.data;
+          
+          if (src.includes("priyanshi")) {
+            const audioUrl = data?.data?.high || data?.data?.low || data?.data?.url;
+            if (audioUrl) return audioUrl;
+          } else if (src.includes("prexzyvilla")) {
+            const content = data?.result || data?.data || data;
+            const medias = content?.medias || [];
+            const audio = medias.find((m: any) => m.type === 'audio') || medias[0];
+            const downloadUrl = audio?.url || content?.high || content?.low || content?.url;
+            if (downloadUrl) return downloadUrl;
+          } else {
+            const genericData = data?.data || data?.result || data;
+            const downloadUrl = genericData.high || genericData.low || genericData.audio || genericData.url || (genericData.links && genericData.links[0]?.url);
+            if (downloadUrl) return downloadUrl;
+          }
+        } catch (e) {
+          console.log(`Fallback source ${src} failed or timed out`);
+        }
+      }
+    } catch (err) {
+      console.error("All fallback sources failed");
+    }
+    return null;
+  }
+
+  async function proxyStream(url: string, res: express.Response) {
+    try {
+      const response = await axios.get(url, {
+        responseType: 'stream',
+        timeout: 180000,
+        maxRedirects: 5,
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 
+          'Referer': 'https://www.youtube.com/' 
+        }
+      });
+      
+      const contentType = (response.headers['content-type'] as string) || 'audio/mpeg';
+      res.setHeader("Content-Type", contentType);
+      if (response.headers['content-length']) {
+        res.setHeader("Content-Length", response.headers['content-length'] as string);
+      }
+      
+      response.data.pipe(res);
+      
+      response.data.on('error', (err: any) => {
+        console.error("Proxy stream data error:", err);
+        if (!res.headersSent) res.status(500).end();
+      });
+    } catch (err) {
+      console.error("Proxy stream failed:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Failed to proxy stream" });
+    }
+  }
 
   app.get("/api/lyrics", async (req, res) => {
     const rawQuery = req.query.q as string;
@@ -562,8 +674,11 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    
+    // Kick off trending update after server is listening
+    updateTrending();
   });
 }
 
