@@ -1,0 +1,16 @@
+{
+  "short_name": "MusicFlow",
+  "name": "Nova MusicFlow",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3844/3844724.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#070708",
+  "background_color": "#070708"
+}

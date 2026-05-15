@@ -1,0 +1,97 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  /* Modern Mix Palette */
+  --color-magenta: #FF00FF;
+  --color-neon-pink: #FF10F0;
+  --color-neon-blue: #00F2FF;
+  --color-neon-green: #39FF14;
+  --color-neon-red: #FF3131;
+}
+
+:root {
+  --app-bg: #050506;
+  --text-primary: #F8F8F8;
+  --card-bg: rgba(10, 10, 12, 0.4);
+}
+
+:root.light {
+  --app-bg: #f5f5f7;
+  --text-primary: #1a1a1c;
+  --card-bg: rgba(255, 255, 255, 0.7);
+}
+
+body {
+  background-color: var(--app-bg);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
+  font-family: var(--font-sans);
+  overflow: hidden;
+  margin: 0;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mixed-gradient {
+  background: linear-gradient(135deg, var(--color-magenta) 0%, var(--color-neon-pink) 25%, var(--color-neon-blue) 75%, var(--color-neon-green) 100%);
+  background-size: 200% 200%;
+  animation: gradientMove 10s ease infinite;
+}
+
+@keyframes gradientMove {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.mixed-text {
+  background: linear-gradient(135deg, var(--color-magenta), var(--color-neon-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.animate-spin-slow {
+  animation: spin 8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.markdown-body pre {
+  background: rgba(255,255,255,0.05) !important;
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 1rem;
+  border-radius: 1rem;
+}

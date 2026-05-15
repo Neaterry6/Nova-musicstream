@@ -1,0 +1,12 @@
+{
+  "name": "Nova MusicFlow",
+  "description": "Premium music streaming with smart recommendations, offline playback, and viral collections.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
