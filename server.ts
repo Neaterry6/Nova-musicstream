@@ -3,11 +3,116 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
 import ytdl from "@distube/ytdl-core";
-import ytSearch from "yt-search";
 import fs from "fs";
 import axios from "axios";
 import FormData from "form-data";
 import { GoogleGenAI } from "@google/genai";
+
+
+const PIPED_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi-libre.kavin.rocks"
+];
+
+const INVIDIOUS_INSTANCES = [
+  "https://inv.nadeko.net",
+  "https://invidious.jing.rocks",
+  "https://yt.lemnoslife.com"
+];
+
+const DEV_PRIYANSHI = "https://dev-priyanshi.onrender.com/api/alldl";
+
+async function tryFetch(urls: string[]) {
+  let lastErr: unknown;
+  for (const url of urls) {
+    try {
+      const { data } = await axios.get(url, { timeout: 15000 });
+      return data;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("All endpoints failed");
+}
+
+async function ytSearch(queryOrOptions: string | { listId: string }) {
+  if (typeof queryOrOptions !== 'string') {
+    const id = queryOrOptions.listId;
+    const urls = PIPED_INSTANCES.map(base => `${base}/playlists/${id}`);
+    const data = await tryFetch(urls);
+    const relatedStreams = data?.relatedStreams || [];
+    return {
+      title: data?.name || 'Playlist',
+      thumbnail: data?.thumbnailUrl || '',
+      author: { name: data?.uploader || 'Unknown' },
+      videos: relatedStreams.map((v: any) => ({
+        videoId: v.url?.split('v=')[1] || '',
+        title: v.title,
+        thumbnail: v.thumbnail,
+        timestamp: v.duration,
+        author: { name: v.uploaderName || 'Unknown' },
+        url: `https://youtube.com${v.url}`
+      })),
+      playlists: []
+    };
+  }
+
+  const q = encodeURIComponent(queryOrOptions);
+  try {
+    const urls = PIPED_INSTANCES.map(base => `${base}/search?q=${q}&filter=videos`);
+    const data = await tryFetch(urls);
+    const videos = (data || []).map((v: any) => ({
+      videoId: v.url?.split('v=')[1] || '',
+      title: v.title,
+      thumbnail: v.thumbnail,
+      timestamp: v.duration,
+      author: { name: v.uploaderName || 'Unknown' },
+      url: `https://youtube.com${v.url}`
+    }));
+    return { videos, playlists: [] };
+  } catch {}
+
+  const urls = INVIDIOUS_INSTANCES.map(base => `${base}/api/v1/search?q=${q}&type=video`);
+  const data = await tryFetch(urls);
+  const videos = (data || []).map((v: any) => ({
+    videoId: v.videoId,
+    title: v.title,
+    thumbnail: v.videoThumbnails?.[0]?.url,
+    timestamp: v.lengthSeconds,
+    author: { name: v.author || 'Unknown' },
+    url: `https://youtube.com/watch?v=${v.videoId}`
+  }));
+  return { videos, playlists: [] };
+}
+
+async function ytDownload(urlOrId: string) {
+  const url = urlOrId.includes('youtube.com') || urlOrId.includes('youtu.be')
+    ? urlOrId
+    : `https://youtube.com/watch?v=${urlOrId}`;
+
+  try {
+    const { data } = await axios.get(DEV_PRIYANSHI, { params: { url }, timeout: 30000 });
+    if (data?.status && data?.data) {
+      return {
+        title: data.data.title,
+        thumbnail: data.data.thumbnail,
+        audio: { url: data.data.low || data.data.high, quality: '128kbps' },
+        video: { url: data.data.high, quality: data.data.high ? '720p' : '480p' }
+      };
+    }
+  } catch {}
+
+  const id = (url.split('v=')[1] || '').split('&')[0];
+  const streamData = await tryFetch(PIPED_INSTANCES.map(base => `${base}/streams/${id}`));
+  const audio = streamData.audioStreams?.sort((a: any, b: any) => b.bitrate - a.bitrate)?.[0];
+  const video = streamData.videoStreams?.sort((a: any, b: any) => Number(b.quality) - Number(a.quality))?.[0];
+  return {
+    title: streamData.title,
+    thumbnail: streamData.thumbnailUrl,
+    audio: audio ? { url: audio.url, quality: `${Math.round(audio.bitrate / 1000)}kbps` } : null,
+    video: video ? { url: video.url, quality: video.quality } : null
+  };
+}
 
 let trendingCache: any[] = [];
 let dailyPick: any = null;
@@ -427,73 +532,24 @@ async function createApp() {
 
   app.get("/api/download", async (req, res) => {
     const rawUrl = req.query.url as string;
-    let url = rawUrl;
-    const format = req.query.format as string || "mp4";
+    const format = (req.query.format as string) || "mp4";
 
     if (!rawUrl) return res.status(400).json({ error: "URL is required" });
 
     try {
       const resolved = await resolvePlayableUrl(rawUrl);
       if (!resolved) return res.status(404).json({ error: "No video found for query" });
-      url = resolved;
-    } catch (err) {
-      return res.status(500).json({ error: "Search failed during download" });
-    }
-
-    const ytdlOptions: ytdl.downloadOptions = {
-      quality: format === "mp3" ? "highestaudio" : "highestvideo",
-      requestOptions: {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-          "Accept-Encoding": "identity",
-          "Accept-Language": "en-US,en;q=0.9",
-        }
-      },
-      filter: (format === "mp3" ? "audioonly" : "videoandaudio") as ytdl.Filter
-    };
-
-    try {
-      const info = await ytdl.getInfo(url, ytdlOptions);
-      const title = info.videoDetails.title.replace(/[^\w\s]/gi, "");
-      
-      if (format === "mp3") {
-        res.header("Content-Type", "audio/mpeg");
-      } else {
-        res.header("Content-Type", "video/mp4");
-      }
-      
-      res.header("Content-Disposition", `attachment; filename="${title}.${format}"`);
-      ytdl(url, ytdlOptions).pipe(res);
-      
+      const dl = await ytDownload(resolved);
+      const source = format === 'mp3' ? dl.audio?.url : dl.video?.url;
+      if (!source) return res.status(404).json({ error: `No ${format} source available` });
+      const upstream = await axios.get(source, { responseType: 'stream', timeout: 60000 });
+      const safeTitle = (dl.title || 'download').replace(/[^\w\s]/gi, '');
+      res.header('Content-Disposition', `attachment; filename="${safeTitle}.${format}"`);
+      res.header('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
+      upstream.data.pipe(res);
     } catch (error) {
-      console.error("YTDL download failed, trying fallback...", error);
-      
-      const fallbackUrl = await getFallbackStreamUrl(rawUrl);
-      if (fallbackUrl) {
-         if (format === "mp3") res.header("Content-Type", "audio/mpeg");
-         else res.header("Content-Type", "video/mp4");
-         res.header("Content-Disposition", `attachment; filename="download.${format}"`);
-         return proxyStream(fallbackUrl, res);
-      }
-
-      res.status(500).json({ error: "Download failed. YouTube's bot detection might be blocking this request." });
-    }
-  });
-
-  app.get("/api/trending", (req, res) => {
-    try {
-      res.json(trendingCache || []);
-    } catch (err) {
-      res.status(500).json({ error: "Failed to serve trending cache" });
-    }
-  });
-
-  app.get("/api/daily-pick", (req, res) => {
-    try {
-      res.json(dailyPick || null);
-    } catch (err) {
-      res.status(500).json({ error: "Failed to serve daily pick" });
+      console.error("Download API failed:", error);
+      return res.status(500).json({ error: "Failed to get download link" });
     }
   });
 
