@@ -123,7 +123,8 @@ async function createApp() {
   });
 
   app.get("/api/featured-artists", (req, res) => {
-    res.json(featuredArtistsCache);
+    const fallbackArtists = Object.values(ARTIST_POOLS).flat();
+    res.json(featuredArtistsCache.length ? featuredArtistsCache : fallbackArtists);
   });
 
   app.get("/api/recommendations", async (req, res) => {
