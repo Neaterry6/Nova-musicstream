@@ -155,8 +155,18 @@ async function updateTrending() {
       { key: "Asian", artists: ARTIST_POOLS.asia }
     ];
 
-    const artistResults = await Promise.all(artistGroups.flatMap(group =>
-      group.artists.map(async (artist) => {
+    // Don't query every artist on every refresh. Too many upstream requests can
+    // trigger provider throttling and then break regular search.
+    const MAX_ARTISTS_PER_GROUP = 6;
+    const sampledArtists = artistGroups.flatMap((group) =>
+      group.artists
+        .slice()
+        .sort(() => Math.random() - 0.5)
+        .slice(0, MAX_ARTISTS_PER_GROUP)
+        .map((artist) => ({ artist, key: group.key }))
+    );
+
+    const artistResults = await Promise.all(sampledArtists.map(async ({ artist, key }) => {
         try {
           const results = await ytSearch(`${artist.name} latest hits ${currentYear} official audio`);
           const top = results.videos?.[0];
@@ -168,7 +178,7 @@ async function updateTrending() {
             duration: top.timestamp,
             author: artist.name,
             url: top.url,
-            category: group.key,
+            category: key,
             type: "track",
             year: String(currentYear),
             genre: artist.genre,
@@ -178,7 +188,7 @@ async function updateTrending() {
           return null;
         }
       })
-    ));
+    );
 
     const curatedQueries = ["top global music hits 2026", "trending afrobeats 2026", "trending uk drill 2026", "trending asian music 2026"];
     const curatedResults = await Promise.all(curatedQueries.map(async (query) => {
@@ -198,8 +208,26 @@ async function updateTrending() {
       } catch { return []; }
     }));
 
+    let deezerChartTracks: any[] = [];
+    try {
+      const chartRes = await axios.get("https://api.deezer.com/chart/0/tracks?limit=25", { timeout: 15000 });
+      deezerChartTracks = (chartRes.data?.data || []).map((t: any) => ({
+        id: `dz_${t.id}`,
+        title: t.title,
+        thumbnail: t.album?.cover_medium,
+        duration: t.duration,
+        author: t.artist?.name || "Unknown Artist",
+        url: `https://www.youtube.com/results?search_query=${encodeURIComponent((t.artist?.name || "") + " " + t.title + " official audio")}`,
+        category: "Trending",
+        type: "track",
+        year: String(currentYear)
+      }));
+    } catch (error) {
+      console.error("Failed to fetch Deezer chart tracks:", error);
+    }
+
     featuredArtistsCache = Object.values(ARTIST_POOLS).flat();
-    trendingCache = [...artistResults.filter(Boolean), ...curatedResults.flat()] as any[];
+    trendingCache = [...deezerChartTracks, ...artistResults.filter(Boolean), ...curatedResults.flat()] as any[];
     const tracksOnly = trendingCache.filter((t) => t.type === 'track');
     if (tracksOnly.length > 0) dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
     lastTrendingUpdate = Date.now();
@@ -256,77 +284,85 @@ async function createApp() {
     const q = req.query.q as string;
     if (!q) return res.status(400).json({ error: "Query is required" });
 
+    let videos: any[] = [];
+    let playlists: any[] = [];
+    let artists: any[] = [];
+    let dzAlbums: any[] = [];
+    let dzTracks: any[] = [];
+
+    // YouTube results should improve search quality, but they should not be required
+    // for the endpoint to succeed.
     try {
       const results = await ytSearch(q);
-      const videos = results.videos.slice(0, 20).map(v => ({
+      videos = (results?.videos || []).slice(0, 20).map(v => ({
         id: v.videoId,
         title: v.title,
         thumbnail: v.thumbnail,
         duration: v.timestamp,
-        author: v.author.name,
+        author: v.author?.name || "YouTube",
         url: v.url,
         type: "track"
       }));
-      const playlists = results.playlists.slice(0, 5).map(p => ({
+
+      playlists = (results?.playlists || []).slice(0, 5).map(p => ({
         id: p.listId,
         title: p.title,
         thumbnail: p.thumbnail,
-        author: p.author.name,
+        author: p.author?.name || "YouTube",
         url: p.url,
         type: "album",
         trackCount: p.videoCount
       }));
-
-      // Search artists and albums via Deezer with better filtering
-      let artists: any[] = [];
-      let dzAlbums: any[] = [];
-      try {
-        const [artRes, albRes, searchRes] = await Promise.all([
-           axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=15`),
-           axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=15`),
-           axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`)
-        ]);
-
-        artists = artRes.data.data.map((a: any) => ({
-          id: a.id,
-          name: a.name,
-          title: a.name,
-          thumbnail: a.picture_medium,
-          type: "artist",
-          fans: a.nb_fan,
-          author: "Verified Artist"
-        }));
-
-        dzAlbums = albRes.data.data.map((a: any) => ({
-          id: a.id,
-          title: a.title,
-          thumbnail: a.cover_medium,
-          author: a.artist.name,
-          type: "album",
-          trackCount: a.nb_tracks || "Album"
-        }));
-
-        const dzTracks = searchRes.data.data.map((t: any) => ({
-          id: t.id,
-          title: t.title,
-          thumbnail: t.album.cover_medium,
-          author: t.artist.name,
-          url: `https://www.youtube.com/results?search_query=${encodeURIComponent(t.artist.name + ' ' + t.title)}`,
-          type: "track",
-          duration: t.duration
-        }));
-
-        res.json([...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos]);
-        return;
-      } catch (e) {
-        console.error("Deezer search failed:", e);
-      }
-
-      res.json([...artists, ...dzAlbums, ...playlists, ...videos]);
     } catch (error) {
-      console.error("Search error:", error);
-      res.status(500).json({ error: "Search failed" });
+      console.error("YouTube search failed:", error);
     }
+
+    // Always try Deezer so artist/song search still works even if YouTube is down.
+    try {
+      const [artRes, albRes, searchRes] = await Promise.all([
+        axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=15`),
+        axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=15`),
+        axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`)
+      ]);
+
+      artists = (artRes.data?.data || []).map((a: any) => ({
+        id: a.id,
+        name: a.name,
+        title: a.name,
+        thumbnail: a.picture_medium,
+        type: "artist",
+        fans: a.nb_fan,
+        author: "Verified Artist"
+      }));
+
+      dzAlbums = (albRes.data?.data || []).map((a: any) => ({
+        id: a.id,
+        title: a.title,
+        thumbnail: a.cover_medium,
+        author: a.artist?.name || "Unknown Artist",
+        type: "album",
+        trackCount: a.nb_tracks || "Album"
+      }));
+
+      dzTracks = (searchRes.data?.data || []).map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        thumbnail: t.album?.cover_medium,
+        author: t.artist?.name || "Unknown Artist",
+        url: `https://www.youtube.com/results?search_query=${encodeURIComponent((t.artist?.name || "") + ' ' + t.title)}`,
+        type: "track",
+        duration: t.duration
+      }));
+    } catch (error) {
+      console.error("Deezer search failed:", error);
+    }
+
+    const payload = [...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos];
+    if (payload.length === 0) {
+      return res.status(503).json({ error: "Search providers unavailable" });
+    }
+
+    res.json(payload);
   });
 
   app.get("/api/artist/:id", async (req, res) => {
