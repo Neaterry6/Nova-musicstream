@@ -56,9 +56,7 @@ import {
   Clock,
   History as HistoryIcon,
   Monitor,
-  Smartphone,
-  Menu,
-  X
+  Smartphone
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, db, signInWithGoogle } from "./lib/firebase";
@@ -125,7 +123,6 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [trendingTracks, setTrendingTracks] = useState<any[]>([]);
   const [trendingCategory, setTrendingCategory] = useState("Trending");
-  const [featuredArtists, setFeaturedArtists] = useState<any[]>([]);
   const [searchSuggestions, setSearchSuggestions] = useState<any[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedAlbum, setSelectedAlbum] = useState<any | null>(null);
@@ -148,7 +145,6 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const audioRef = React.useRef<HTMLAudioElement>(null);
 
   // Offline URL Loader
@@ -381,13 +377,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  useEffect(() => {
-    fetch("/api/featured-artists")
-      .then((res) => res.json())
-      .then((data) => setFeaturedArtists(Array.isArray(data) ? data : []))
-      .catch(() => setFeaturedArtists([]));
-  }, []);
-
   // Trending Loader
   useEffect(() => {
     const fetchTrending = async (retries = 3) => {
@@ -411,27 +400,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-
-
-  // Auto-refresh visible feeds when user enters each section
-  useEffect(() => {
-    if (activeTab !== "home" && activeTab !== "trending" && activeTab !== "videos" && activeTab !== "artists") return;
-
-    if ((activeTab === "home" || activeTab === "trending") && trendingTracks.length === 0) {
-      fetch("/api/trending")
-        .then((res) => res.json())
-        .then((data) => setTrendingTracks(Array.isArray(data) ? data : []))
-        .catch(() => {});
-    }
-
-    if (activeTab === "artists" && featuredArtists.length === 0) {
-      fetch("/api/featured-artists")
-        .then((res) => res.json())
-        .then((data) => setFeaturedArtists(Array.isArray(data) ? data : []))
-        .catch(() => {});
-    }
-  }, [activeTab, trendingTracks.length, featuredArtists.length]);
-
   const handleAlbumClick = async (album: any) => {
     setFetchingAlbum(true);
     setSelectedAlbum(null);
@@ -452,20 +420,11 @@ export default function App() {
     setSelectedArtist(null);
     setActiveTab("artist-view");
     try {
-      let artistId = artist.id;
-      if (!artistId || !/^\d+$/.test(String(artistId))) {
-        const searchRes = await fetch(`/api/search?q=${encodeURIComponent(artist.name || artist.title || "")}`);
-        const searchData = await searchRes.json();
-        const artistResult = (searchData || []).find((item: any) => item.type === "artist" && item.id);
-        artistId = artistResult?.id;
-      }
-      if (!artistId) throw new Error("Artist ID not found");
-      const res = await fetch(`/api/artist/${artistId}`);
+      const res = await fetch(`/api/artist/${artist.id}`);
       const data = await res.json();
       setSelectedArtist(data);
     } catch (err) {
       console.error("Artist load failed", err);
-      setErrorMessage("Could not load artist details right now.");
     } finally {
       setFetchingArtist(false);
     }
@@ -473,22 +432,16 @@ export default function App() {
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const query = searchQuery.trim();
-    if (!query) return;
+    if (!searchQuery) return;
     setShowSuggestions(false);
     setIsSearching(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-      if (!res.ok) throw new Error(`Search failed with status ${res.status}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
       const data = await res.json();
-      const normalized = Array.isArray(data) ? data : [];
-      setSearchResults(normalized);
+      setSearchResults(data);
       setActiveTab("downloader");
-      if (normalized.length === 0) setErrorMessage("No search result found. Try another keyword.");
     } catch (err) {
       console.error("Search failed", err);
-      setSearchResults([]);
-      setErrorMessage("Search is not available right now. Please try again.");
     } finally {
       setIsSearching(false);
     }
@@ -577,31 +530,15 @@ export default function App() {
   }
 
   return (
-    <div className="relative min-h-screen w-full bg-[#070708] text-[#E0E0E0] font-sans flex flex-col overflow-hidden">
+    <div className="relative h-screen w-full bg-[#070708] text-[#E0E0E0] font-sans flex flex-col overflow-hidden">
       {/* Mesh Background */}
       <div className="absolute top-[-100px] left-[-100px] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[120px] pointer-events-none"></div>
       <div className="absolute bottom-[-100px] right-[-100px] w-[600px] h-[600px] bg-blue-500/10 rounded-full blur-[150px] pointer-events-none"></div>
 
       <div className="relative z-10 flex flex-1 overflow-hidden">
         
-        <button
-          onClick={() => setSidebarOpen((prev) => !prev)}
-          className="md:hidden fixed top-4 left-4 z-[130] w-11 h-11 rounded-xl bg-black/60 border border-white/20 backdrop-blur-xl flex items-center justify-center"
-          aria-label={sidebarOpen ? "Close menu" : "Open menu"}
-        >
-          {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
-        </button>
-
-        {sidebarOpen && (
-          <button
-            className="md:hidden fixed inset-0 z-[115] bg-black/50"
-            onClick={() => setSidebarOpen(false)}
-            aria-label="Close sidebar overlay"
-          />
-        )}
-
         {/* Sidebar */}
-        <aside className={`fixed md:relative inset-y-0 left-0 z-[120] w-72 md:w-64 backdrop-blur-xl bg-[#0c0c0e]/95 md:bg-white/5 border-r border-white/10 flex flex-col p-6 transform transition-transform duration-300 ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
+        <aside className="w-64 backdrop-blur-xl bg-white/5 border-r border-white/10 flex flex-col p-6">
           <div className="flex items-center gap-3 mb-10">
             <div className="w-8 h-8 bg-magenta rounded-full flex items-center justify-center">
               <Star size={16} color="black" />
@@ -612,12 +549,11 @@ export default function App() {
           <nav className="space-y-6 flex-1 overflow-y-auto no-scrollbar">
             <div className="space-y-2">
               <p className="text-[10px] uppercase tracking-[0.2em] text-white/40 font-bold px-2">Menu</p>
-              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={() => { setActiveTab("home"); setSidebarOpen(false); }} />
-              <SidebarItem icon={<TrendingUp size={20} />} label="Trending" active={activeTab === "trending"} onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} />
-              <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => { setActiveTab("videos"); setSidebarOpen(false); }} />
-              <SidebarItem icon={<Users size={20} />} label="Artists" active={activeTab === "artists"} onClick={() => { setActiveTab("artists"); setSidebarOpen(false); }} />
-              <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => { setActiveTab("shazam"); setSidebarOpen(false); }} />
-              <SidebarItem icon={<Download size={20} />} label="Downloader" active={activeTab === "downloader"} onClick={() => { setActiveTab("downloader"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={() => setActiveTab("home")} />
+              <SidebarItem icon={<TrendingUp size={20} />} label="Trending" active={activeTab === "trending"} onClick={() => setActiveTab("trending")} />
+              <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
+              <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => setActiveTab("shazam")} />
+              <SidebarItem icon={<Download size={20} />} label="Downloader" active={activeTab === "downloader"} onClick={() => setActiveTab("downloader")} />
               {isAdmin && (
                 <SidebarItem icon={<ShieldCheck size={20} className="text-magenta" />} label="Admin Panel" active={activeTab === "admin"} onClick={() => setActiveTab("admin")} />
               )}
@@ -632,7 +568,7 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <SidebarItem icon={<WifiOff size={20} />} label="Offline" active={activeTab === "offline"} onClick={() => { setActiveTab("offline"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<WifiOff size={20} />} label="Offline" active={activeTab === "offline"} onClick={() => setActiveTab("offline")} />
               <div className="space-y-1">
                 {playlists.map(p => (
                   <SidebarPlaylist key={p.id} name={p.name} onClick={() => { setActiveTab(`playlist-${p.id}`) }} />
@@ -674,7 +610,7 @@ export default function App() {
         </aside>
 
         {/* Main Area */}
-        <main className="flex-1 flex flex-col p-4 pt-24 md:pt-8 md:p-8 overflow-y-auto overflow-x-hidden relative pb-36 md:pb-8">
+        <main className="flex-1 flex flex-col p-8 overflow-y-auto overflow-x-hidden relative">
           
           <AnimatePresence>
             {showWelcome && user && (
@@ -705,8 +641,7 @@ export default function App() {
           </AnimatePresence>
 
           {/* Header Search Bar */}
-
-          <div className="flex items-center justify-center mb-6 md:mb-10 relative z-[95]">
+          <div className="flex items-center justify-center mb-10 relative z-[95]">
             <form onSubmit={handleSearch} className="relative w-full max-w-2xl group">
               <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-white/30 group-focus-within:text-magenta transition-colors" size={20} />
               <input 
@@ -836,7 +771,7 @@ export default function App() {
                           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Global Hits</p>
                        </div>
                     </div>
-                    <button onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} className="text-[10px] text-white/40 hover:text-magenta uppercase font-black tracking-widest transition-colors">View More</button>
+                    <button onClick={() => setActiveTab("trending")} className="text-[10px] text-white/40 hover:text-magenta uppercase font-black tracking-widest transition-colors">View More</button>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-8">
                     {trendingTracks.filter(t => t.type === 'track').slice(0, 6).map((t) => (
@@ -918,23 +853,31 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex gap-8 overflow-x-auto no-scrollbar pb-6 -mx-4 px-4">
-                    {featuredArtists.map((art, idx) => (
+                    {[
+                      { id: 27, name: 'Daft Punk', img: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c9484f380a9370f37d50/500x500.jpg' },
+                      { id: 13, name: 'Eminem', img: 'https://e-cdns-images.dzcdn.net/images/artist/19543ad22da6e03946014e5cae285a8a/500x500.jpg' },
+                      { id: 1, name: 'The Beatles', img: 'https://e-cdns-images.dzcdn.net/images/artist/0bf0f45532298c440a77519a868424a7/500x500.jpg' },
+                      { id: 412, name: 'Queen', img: 'https://e-cdns-images.dzcdn.net/images/artist/Queen/500x500.jpg' },
+                      { id: 119, name: 'Metallica', img: 'https://e-cdns-images.dzcdn.net/images/artist/Metallica/500x500.jpg' },
+                      { id: 5092, name: 'Pink Floyd', img: 'https://e-cdns-images.dzcdn.net/images/artist/PinkFloyd/500x500.jpg' },
+                      { id: 144227, name: 'Drake', img: 'https://e-cdns-images.dzcdn.net/images/artist/Drake/500x500.jpg' },
+                      { id: 1045, name: 'Coldplay', img: 'https://e-cdns-images.dzcdn.net/images/artist/080df105c973022c6019bd375f928aad/500x500.jpg' }
+                    ].map(art => (
                       <div 
-                        key={`${art.name}-${idx}`} 
-                        onClick={() => { setSearchQuery(art.name); handleSearch(); }}
+                        key={art.id} 
+                        onClick={() => handleArtistClick(art)}
                         className="w-44 shrink-0 group cursor-pointer space-y-4"
                       >
                         <div className="relative aspect-square rounded-full overflow-hidden border-2 border-white/5 group-hover:border-magenta transition-all shadow-2xl">
-                          <div className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 bg-gradient-to-br from-magenta/30 via-blue-500/20 to-emerald-500/20 flex items-center justify-center p-3 text-center">
-                            <span className="font-black text-xs uppercase tracking-wider">{art.name}</span>
-                          </div>
+                          <img src={art.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={art.name} />
                           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
                             <ArrowRight className="text-white" />
                           </div>
                         </div>
                         <p className="text-center font-black italic uppercase tracking-tighter text-sm group-hover:text-magenta transition-colors">{art.name}</p>
                       </div>
-                    ))}                  </div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="space-y-12">
@@ -1022,7 +965,7 @@ export default function App() {
                                <button onClick={() => { if (selectedAlbum.tracks?.[0]) { setCurrentTrack(selectedAlbum.tracks[0]); setIsPlaying(true); } }} className="px-10 py-4 mixed-gradient rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-3">
                                   <Play fill="white" stroke="none" size={16} /> Stream Album
                                </button>
-                               <button onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} className="px-10 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-black uppercase tracking-widest text-xs border border-white/10 text-white/60">Back</button>
+                               <button onClick={() => setActiveTab("trending")} className="px-10 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-black uppercase tracking-widest text-xs border border-white/10 text-white/60">Back</button>
                             </div>
                          </div>
                       </div>
@@ -1273,44 +1216,16 @@ export default function App() {
               <VideosView onPlay={(v: any) => { setCurrentTrack({ ...v, cover: v.thumbnail, artist: v.author }); setIsPlaying(true); }} onDownload={(v: any) => setDownloadModal(v)} />
             )}
 
-            {activeTab === "artists" && (
-              <ArtistsView artists={featuredArtists} onOpenArtist={handleArtistClick} />
-            )}
-
             {activeTab === "shazam" && (
               <ShazamView onPlay={(track: any) => { setSearchQuery(`${track.artist} ${track.title}`); handleSearch(); }} />
             )}
 
             {activeTab === "artist-view" && (
-              <ArtistView loading={fetchingArtist} artist={selectedArtist} onPlay={(t: any) => { setCurrentTrack(t); setIsPlaying(true); }} onAlbum={handleAlbumClick} onDownload={downloadTrack} />
+              <ArtistView loading={fetchingArtist} artist={selectedArtist} onPlay={(t: any) => { setCurrentTrack(t); setIsPlaying(true); }} onAlbum={handleAlbumClick} />
             )}
           </AnimatePresence>
         </main>
       </div>
-
-      <nav className="md:hidden fixed bottom-4 left-3 right-3 z-[110] rounded-2xl border border-white/10 bg-black/85 backdrop-blur-xl px-3 pt-2.5 pb-[calc(0.75rem+env(safe-area-inset-bottom))] grid grid-cols-6 gap-1.5 shadow-2xl">
-        {[
-          { key: "home", icon: Home, label: "Home" },
-          { key: "trending", icon: TrendingUp, label: "Trend" },
-          { key: "artists", icon: Users, label: "Artists" },
-          { key: "videos", icon: VideoIcon, label: "Videos" },
-          { key: "downloader", icon: Download, label: "DL" },
-          { key: "shazam", icon: Mic2, label: "ID" }
-        ].map((item) => {
-          const Icon = item.icon;
-          const active = activeTab === item.key;
-          return (
-            <button
-              key={item.key}
-              onClick={() => setActiveTab(item.key)}
-              className={`flex flex-col items-center justify-center gap-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-wider ${active ? "mixed-gradient text-white" : "text-white/60 hover:bg-white/10"}`}
-            >
-              <Icon size={15} />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </nav>
 
       {/* Player Bar */}
       <footer className="h-24 backdrop-blur-3xl bg-black/80 border-t border-white/10 flex items-center justify-between px-10 relative z-[90]">
@@ -1859,27 +1774,6 @@ const VideosView = ({ onPlay, onDownload }: any) => {
   );
 };
 
-const ArtistsView = ({ artists, onOpenArtist }: any) => {
-  const items = artists || [];
-  return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
-      <div>
-        <h3 className="text-3xl font-black italic tracking-tighter uppercase">Trending Artists</h3>
-        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Tap any artist to load songs & albums</p>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        {items.map((a: any) => (
-          <button key={a.name} onClick={() => onOpenArtist({ id: a.id || a.name, name: a.name })} className="text-left p-4 bg-white/5 border border-white/10 rounded-2xl hover:bg-white/10">
-            <div className="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center mb-3"><Users size={20} /></div>
-            <p className="text-xs font-bold uppercase truncate">{a.name}</p>
-            <p className="text-[10px] text-white/40 uppercase">{a.genre || 'Artist'}</p>
-          </button>
-        ))}
-      </div>
-    </motion.div>
-  );
-};
-
 const ShazamView = ({ onPlay }: any) => {
   const [isRecording, setIsRecording] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -1894,11 +1788,9 @@ const ShazamView = ({ onPlay }: any) => {
     setResult(null);
     setError(null);
     try {
-      const ext = blob.type.includes("ogg") ? "ogg" : blob.type.includes("mpeg") ? "mp3" : "webm";
-      const file = new File([blob], `sample.${ext}`, { type: blob.type || "audio/ogg" });
       const res = await fetch("/api/shazam", {
         method: "POST",
-        body: file
+        body: blob
       });
       const data = await res.json();
       console.log("Shazam result:", data);

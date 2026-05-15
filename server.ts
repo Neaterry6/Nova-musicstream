@@ -3,233 +3,81 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
 import ytdl from "@distube/ytdl-core";
+import ytSearch from "yt-search";
 import fs from "fs";
 import axios from "axios";
 import FormData from "form-data";
 import { GoogleGenAI } from "@google/genai";
 
-
-const PIPED_INSTANCES = [
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi-libre.kavin.rocks"
-];
-
-const INVIDIOUS_INSTANCES = [
-  "https://inv.nadeko.net",
-  "https://invidious.jing.rocks",
-  "https://yt.lemnoslife.com"
-];
-
-const DEV_PRIYANSHI = "https://dev-priyanshi.onrender.com/api/alldl";
-
-async function tryFetch(urls: string[]) {
-  let lastErr: unknown;
-  for (const url of urls) {
-    try {
-      const { data } = await axios.get(url, { timeout: 15000 });
-      return data;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr || new Error("All endpoints failed");
-}
-
-async function ytSearch(queryOrOptions: string | { listId: string }) {
-  if (typeof queryOrOptions !== 'string') {
-    const id = queryOrOptions.listId;
-    const urls = PIPED_INSTANCES.map(base => `${base}/playlists/${id}`);
-    const data = await tryFetch(urls);
-    const relatedStreams = data?.relatedStreams || [];
-    return {
-      title: data?.name || 'Playlist',
-      thumbnail: data?.thumbnailUrl || '',
-      author: { name: data?.uploader || 'Unknown' },
-      videos: relatedStreams.map((v: any) => ({
-        videoId: v.url?.split('v=')[1] || '',
-        title: v.title,
-        thumbnail: v.thumbnail,
-        timestamp: v.duration,
-        author: { name: v.uploaderName || 'Unknown' },
-        url: `https://youtube.com${v.url}`
-      })),
-      playlists: []
-    };
-  }
-
-  const q = encodeURIComponent(queryOrOptions);
-  try {
-    const urls = PIPED_INSTANCES.map(base => `${base}/search?q=${q}&filter=videos`);
-    const data = await tryFetch(urls);
-    const videos = (data || []).map((v: any) => ({
-      videoId: v.url?.split('v=')[1] || '',
-      title: v.title,
-      thumbnail: v.thumbnail,
-      timestamp: v.duration,
-      author: { name: v.uploaderName || 'Unknown' },
-      url: `https://youtube.com${v.url}`
-    }));
-    return { videos, playlists: [] };
-  } catch {}
-
-  const urls = INVIDIOUS_INSTANCES.map(base => `${base}/api/v1/search?q=${q}&type=video`);
-  const data = await tryFetch(urls);
-  const videos = (data || []).map((v: any) => ({
-    videoId: v.videoId,
-    title: v.title,
-    thumbnail: v.videoThumbnails?.[0]?.url,
-    timestamp: v.lengthSeconds,
-    author: { name: v.author || 'Unknown' },
-    url: `https://youtube.com/watch?v=${v.videoId}`
-  }));
-  return { videos, playlists: [] };
-}
-
-async function ytDownload(urlOrId: string) {
-  const url = urlOrId.includes('youtube.com') || urlOrId.includes('youtu.be')
-    ? urlOrId
-    : `https://youtube.com/watch?v=${urlOrId}`;
-
-  try {
-    const { data } = await axios.get(DEV_PRIYANSHI, { params: { url }, timeout: 30000 });
-    if (data?.status && data?.data) {
-      return {
-        title: data.data.title,
-        thumbnail: data.data.thumbnail,
-        audio: { url: data.data.low || data.data.high, quality: '128kbps' },
-        video: { url: data.data.high, quality: data.data.high ? '720p' : '480p' }
-      };
-    }
-  } catch {}
-
-  const id = (url.split('v=')[1] || '').split('&')[0];
-  const streamData = await tryFetch(PIPED_INSTANCES.map(base => `${base}/streams/${id}`));
-  const audio = streamData.audioStreams?.sort((a: any, b: any) => b.bitrate - a.bitrate)?.[0];
-  const video = streamData.videoStreams?.sort((a: any, b: any) => Number(b.quality) - Number(a.quality))?.[0];
-  return {
-    title: streamData.title,
-    thumbnail: streamData.thumbnailUrl,
-    audio: audio ? { url: audio.url, quality: `${Math.round(audio.bitrate / 1000)}kbps` } : null,
-    video: video ? { url: video.url, quality: video.quality } : null
-  };
-}
-
 let trendingCache: any[] = [];
 let dailyPick: any = null;
 let lastTrendingUpdate = 0;
 
-
-const ARTIST_POOLS = {
-  nigeria_afrobeat: [
-    { name: "Burna Boy", genre: "Afrobeats", country: "Nigeria" }, { name: "Wizkid", genre: "Afrobeats", country: "Nigeria" }, { name: "Davido", genre: "Afrobeats", country: "Nigeria" }, { name: "Rema", genre: "Afrobeats", country: "Nigeria" }, { name: "Ayra Starr", genre: "Afrobeats", country: "Nigeria" }, { name: "Tems", genre: "Afrobeats/R&B", country: "Nigeria" }, { name: "Olamide", genre: "Afrobeats/Hip-hop", country: "Nigeria" }, { name: "Asake", genre: "Afrobeats", country: "Nigeria" }, { name: "Omah Lay", genre: "Afrobeats", country: "Nigeria" }, { name: "Fireboy DML", genre: "Afrobeats", country: "Nigeria" },
-    { name: "Joeboy", genre: "Afrobeats", country: "Nigeria" }, { name: "CKay", genre: "Afrobeats", country: "Nigeria" }, { name: "BNXN", genre: "Afrobeats", country: "Nigeria" }, { name: "Ruger", genre: "Afrobeats", country: "Nigeria" }, { name: "Victony", genre: "Afrobeats", country: "Nigeria" }, { name: "Seyi Vibez", genre: "Afrobeats", country: "Nigeria" }, { name: "Shallipopi", genre: "Afrobeats", country: "Nigeria" }, { name: "Zinoleesky", genre: "Afrobeats", country: "Nigeria" }, { name: "Mohbad", genre: "Afrobeats", country: "Nigeria" }, { name: "Naira Marley", genre: "Afrobeats", country: "Nigeria" },
-    { name: "Bella Shmurda", genre: "Afrobeats", country: "Nigeria" }, { name: "Portable", genre: "Afrobeats", country: "Nigeria" }, { name: "Kizz Daniel", genre: "Afrobeats", country: "Nigeria" }, { name: "Tekno", genre: "Afrobeats", country: "Nigeria" }, { name: "Pheelz", genre: "Afrobeats", country: "Nigeria" }, { name: "Young Jonn", genre: "Afrobeats", country: "Nigeria" }, { name: "Spyro", genre: "Afrobeats", country: "Nigeria" }, { name: "Qing Madi", genre: "Afrobeats", country: "Nigeria" }, { name: "Odumodublvck", genre: "Afrobeats/Hip-hop", country: "Nigeria" }, { name: "Bloody Civilian", genre: "Afrobeats", country: "Nigeria" },
-    { name: "Tml Vibez", genre: "Afrobeats", country: "Nigeria" }, { name: "Adekunle Gold", genre: "Afrobeats", country: "Nigeria" }, { name: "Simi", genre: "Afrobeats/R&B", country: "Nigeria" }, { name: "Tiwa Savage", genre: "Afrobeats", country: "Nigeria" }, { name: "Yemi Alade", genre: "Afrobeats", country: "Nigeria" }, { name: "D'banj", genre: "Afrobeats", country: "Nigeria" }, { name: "2Baba", genre: "Afrobeats", country: "Nigeria" }, { name: "Timaya", genre: "Afrobeats", country: "Nigeria" }, { name: "Oxlade", genre: "Afrobeats", country: "Nigeria" }, { name: "Magixx", genre: "Afrobeats", country: "Nigeria" },
-    { name: "Bayanni", genre: "Afrobeats", country: "Nigeria" }, { name: "Lojay", genre: "Afrobeats", country: "Nigeria" }, { name: "Libianca", genre: "Afrobeats", country: "Nigeria" }, { name: "FOLA", genre: "Afrobeats", country: "Nigeria" }, { name: "Guchi", genre: "Afrobeats", country: "Nigeria" }, { name: "Khaid", genre: "Afrobeats", country: "Nigeria" }, { name: "Boy Spyce", genre: "Afrobeats", country: "Nigeria" }, { name: "Chike", genre: "Afrobeats", country: "Nigeria" }
-  ],
-  uk: [ { name: "Central Cee", genre: "UK Rap/Afroswing", country: "UK" }, { name: "Stormzy", genre: "UK Rap", country: "UK" }, { name: "Dave", genre: "UK Rap", country: "UK" }, { name: "J Hus", genre: "Afroswing", country: "UK" }, { name: "Skepta", genre: "Grime", country: "UK" }, { name: "Headie One", genre: "UK Drill", country: "UK" }, { name: "NSG", genre: "Afroswing", country: "UK" }, { name: "Digga D", genre: "UK Drill", country: "UK" }, { name: "ArrDee", genre: "UK Rap", country: "UK" }, { name: "Unknown T", genre: "UK Drill", country: "UK" }, { name: "Tion Wayne", genre: "UK Rap/Afroswing", country: "UK" }, { name: "Pa Salieu", genre: "UK Rap", country: "UK" }, { name: "K-Trap", genre: "UK Drill", country: "UK" }, { name: "D-Block Europe", genre: "UK Rap", country: "UK" }, { name: "M Huncho", genre: "UK Rap", country: "UK" }, { name: "Aitch", genre: "UK Rap", country: "UK" }, { name: "Mabel", genre: "R&B/Pop", country: "UK" }, { name: "Mahalia", genre: "R&B", country: "UK" }, { name: "Jorja Smith", genre: "R&B", country: "UK" }, { name: "Raye", genre: "R&B/Pop", country: "UK" }, { name: "Little Simz", genre: "Hip-hop", country: "UK" }, { name: "Stefflon Don", genre: "Dancehall/Rap", country: "UK" }, { name: "Russ Millions", genre: "UK Drill", country: "UK" }, { name: "Potter Payper", genre: "UK Rap", country: "UK" }, { name: "Nines", genre: "UK Rap", country: "UK" }, { name: "Tiana Major9", genre: "R&B", country: "UK" }, { name: "Nemzzz", genre: "UK Rap", country: "UK" }, { name: "AJ Tracey", genre: "UK Rap", country: "UK" }, { name: "Blade Brown", genre: "UK Rap", country: "UK" }, { name: "Clavish", genre: "UK Rap", country: "UK" } ],
-  asia: [ { name: "BTS", genre: "K-pop", country: "South Korea" }, { name: "BLACKPINK", genre: "K-pop", country: "South Korea" }, { name: "Stray Kids", genre: "K-pop", country: "South Korea" }, { name: "NewJeans", genre: "K-pop", country: "South Korea" }, { name: "IVE", genre: "K-pop", country: "South Korea" }, { name: "LE SSERAFIM", genre: "K-pop", country: "South Korea" }, { name: "aespa", genre: "K-pop", country: "South Korea" }, { name: "SEVENTEEN", genre: "K-pop", country: "South Korea" }, { name: "TXT", genre: "K-pop", country: "South Korea" }, { name: "NCT Dream", genre: "K-pop", country: "South Korea" }, { name: "TWICE", genre: "K-pop", country: "South Korea" }, { name: "ITZY", genre: "K-pop", country: "South Korea" }, { name: "ENHYPEN", genre: "K-pop", country: "South Korea" }, { name: "(G)I-DLE", genre: "K-pop", country: "South Korea" }, { name: "YOASOBI", genre: "J-pop", country: "Japan" }, { name: "Kenshi Yonezu", genre: "J-pop", country: "Japan" }, { name: "Ado", genre: "J-pop", country: "Japan" }, { name: "Official Hige Dandism", genre: "J-pop", country: "Japan" }, { name: "King Gnu", genre: "J-pop", country: "Japan" }, { name: "Fujii Kaze", genre: "J-pop", country: "Japan" }, { name: "Diljit Dosanjh", genre: "Punjabi/Pop", country: "India" }, { name: "AP Dhillon", genre: "Punjabi/Hip-hop", country: "India" }, { name: "Shubh", genre: "Punjabi/Hip-hop", country: "India" }, { name: "Karan Aujla", genre: "Punjabi/Hip-hop", country: "India" }, { name: "Sidhu Moose Wala", genre: "Punjabi/Hip-hop", country: "India" }, { name: "Arijit Singh", genre: "Bollywood", country: "India" }, { name: "Shreya Ghoshal", genre: "Bollywood", country: "India" }, { name: "Badshah", genre: "Hip-hop", country: "India" }, { name: "Divine", genre: "Hip-hop", country: "India" }, { name: "Seedhe Maut", genre: "Hip-hop", country: "India" }, { name: "Rich Brian", genre: "Hip-hop", country: "Indonesia" }, { name: "NIKI", genre: "R&B/Pop", country: "Indonesia" }, { name: "Warren Hue", genre: "Hip-hop", country: "Indonesia" }, { name: "Zack Tabudlo", genre: "Pop", country: "Philippines" }, { name: "SB19", genre: "P-pop", country: "Philippines" }, { name: "BINI", genre: "P-pop", country: "Philippines" }, { name: "Milli", genre: "Hip-hop/Pop", country: "Thailand" }, { name: "Jack Maes", genre: "Pop", country: "Thailand" }, { name: "MINO", genre: "K-hip-hop", country: "South Korea" }, { name: "Hoaprox", genre: "EDM", country: "Vietnam" } ]
-} as const;
-
-let featuredArtistsCache: any[] = [];
-
-function isDirectYouTubeUrl(input: string) {
-  return ytdl.validateURL(input);
-}
-
-async function resolvePlayableUrl(rawUrl: string) {
-  if (isDirectYouTubeUrl(rawUrl)) return rawUrl;
-  const normalized = rawUrl.includes('youtube.com/results') ? decodeURIComponent(rawUrl.split('search_query=')[1] || '') : rawUrl;
-  const query = normalized.replace(/\+/g, ' ').trim();
-  const searchResults = await ytSearch(query);
-  if (!searchResults.videos?.length) return null;
-  return searchResults.videos[0].url;
-}
-
 async function updateTrending() {
   try {
     const currentYear = 2026;
-    const artistGroups = [
-      { key: "Afrobeats", artists: ARTIST_POOLS.nigeria_afrobeat },
-      { key: "UK Drill", artists: ARTIST_POOLS.uk },
-      { key: "Asian", artists: ARTIST_POOLS.asia }
+    const currentMonth = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(new Date());
+    
+    const categories = ["Trending", "Afrobeats", "UK Drill", "Asian", "Hip Hop", "Drill", "Amapiano", "Electronic", "Albums"];
+    const queries = [
+      `top global music hits ${currentMonth} 2026`, 
+      "Top Trending Nigerian Afrobeats Hits 2026", 
+      "Latest Naija Music 2026 Afrobeat Anthems",
+      "Trending Asian Hits 2026 K-Pop J-Pop",
+      "Official Billboard Hip Hop Charts 2026", 
+      "Global Drill Music Trends 2026",
+      "New Amapiano 2026 Viral Mix",
+      "Top Trending Electronic and House 2026", 
+      "Best New Nigerian Afrobeat Albums 2026 - Best of Naija"
     ];
-
-    // Don't query every artist on every refresh. Too many upstream requests can
-    // trigger provider throttling and then break regular search.
-    const MAX_ARTISTS_PER_GROUP = 6;
-    const sampledArtists = artistGroups.flatMap((group) =>
-      group.artists
-        .slice()
-        .sort(() => Math.random() - 0.5)
-        .slice(0, MAX_ARTISTS_PER_GROUP)
-        .map((artist) => ({ artist, key: group.key }))
-    );
-
-    const artistResults = await Promise.all(sampledArtists.map(async ({ artist, key }) => {
-        try {
-          const results = await ytSearch(`${artist.name} latest hits ${currentYear} official audio`);
-          const top = results.videos?.[0];
-          if (!top) return null;
-          return {
-            id: top.videoId,
-            title: top.title,
-            thumbnail: top.thumbnail,
-            duration: top.timestamp,
-            author: artist.name,
-            url: top.url,
-            category: key,
-            type: "track",
-            year: String(currentYear),
-            genre: artist.genre,
-            country: artist.country
-          };
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    const curatedQueries = ["top global music hits 2026", "trending afrobeats 2026", "trending uk drill 2026", "trending asian music 2026"];
-    const curatedResults = await Promise.all(curatedQueries.map(async (query) => {
+    
+    const allResults = await Promise.all(queries.map(async (query, i) => {
       try {
         const results = await ytSearch(query);
-        return results.videos.slice(0, 10).map(v => ({
+        const category = categories[i];
+        const categoryResults: any[] = [];
+        
+        // Add tracks
+        const videos = results.videos.slice(0, 15).map(v => ({
           id: v.videoId,
           title: v.title,
           thumbnail: v.thumbnail,
           duration: v.timestamp,
           author: v.author.name,
           url: v.url,
-          category: "Trending",
+          category: category,
           type: "track",
-          year: String(currentYear)
+          year: currentYear.toString()
         }));
-      } catch { return []; }
+        categoryResults.push(...videos);
+  
+        // Add playlists/albums for this category
+        const playlists = results.playlists.slice(0, 5).map(p => ({
+          id: p.listId,
+          title: p.title,
+          thumbnail: p.thumbnail,
+          author: p.author.name,
+          url: p.url,
+          category: category,
+          type: "album",
+          trackCount: p.videoCount
+        }));
+        categoryResults.push(...playlists);
+        return categoryResults;
+      } catch (err) {
+        console.error(`Search failed for ${query}:`, err);
+        return [];
+      }
     }));
-
-    let deezerChartTracks: any[] = [];
-    try {
-      const chartRes = await axios.get("https://api.deezer.com/chart/0/tracks?limit=25", { timeout: 15000 });
-      deezerChartTracks = (chartRes.data?.data || []).map((t: any) => ({
-        id: `dz_${t.id}`,
-        title: t.title,
-        thumbnail: t.album?.cover_medium,
-        duration: t.duration,
-        author: t.artist?.name || "Unknown Artist",
-        url: `https://www.youtube.com/results?search_query=${encodeURIComponent((t.artist?.name || "") + " " + t.title + " official audio")}`,
-        category: "Trending",
-        type: "track",
-        year: String(currentYear)
-      }));
-    } catch (error) {
-      console.error("Failed to fetch Deezer chart tracks:", error);
+    
+    trendingCache = allResults.flat();
+    
+    // Set daily pick from trending
+    const tracksOnly = trendingCache.filter(t => t.type === 'track');
+    if (tracksOnly.length > 0) {
+      dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
     }
 
-    featuredArtistsCache = Object.values(ARTIST_POOLS).flat();
-    trendingCache = [...deezerChartTracks, ...artistResults.filter(Boolean), ...curatedResults.flat()] as any[];
-    const tracksOnly = trendingCache.filter((t) => t.type === 'track');
-    if (tracksOnly.length > 0) dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
     lastTrendingUpdate = Date.now();
     console.log("Trending cache updated with", trendingCache.length, "items");
   } catch (error) {
@@ -241,11 +89,9 @@ async function updateTrending() {
 // (Now called inside startServer after listen)
 setInterval(updateTrending, 12 * 60 * 60 * 1000);
 
-let appInstance: express.Express | null = null;
-
-async function createApp() {
-  if (appInstance) return appInstance;
+async function startServer() {
   const app = express();
+  const PORT = 3000;
 
   app.use(cors());
   app.use(express.json());
@@ -253,11 +99,6 @@ async function createApp() {
   // API routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
-  });
-
-  app.get("/api/featured-artists", (req, res) => {
-    const fallbackArtists = Object.values(ARTIST_POOLS).flat();
-    res.json(featuredArtistsCache.length ? featuredArtistsCache : fallbackArtists);
   });
 
   app.get("/api/recommendations", async (req, res) => {
@@ -284,85 +125,77 @@ async function createApp() {
     const q = req.query.q as string;
     if (!q) return res.status(400).json({ error: "Query is required" });
 
-    let videos: any[] = [];
-    let playlists: any[] = [];
-    let artists: any[] = [];
-    let dzAlbums: any[] = [];
-    let dzTracks: any[] = [];
-
-    // YouTube results should improve search quality, but they should not be required
-    // for the endpoint to succeed.
     try {
       const results = await ytSearch(q);
-      videos = (results?.videos || []).slice(0, 20).map(v => ({
+      const videos = results.videos.slice(0, 20).map(v => ({
         id: v.videoId,
         title: v.title,
         thumbnail: v.thumbnail,
         duration: v.timestamp,
-        author: v.author?.name || "YouTube",
+        author: v.author.name,
         url: v.url,
         type: "track"
       }));
-
-      playlists = (results?.playlists || []).slice(0, 5).map(p => ({
+      const playlists = results.playlists.slice(0, 5).map(p => ({
         id: p.listId,
         title: p.title,
         thumbnail: p.thumbnail,
-        author: p.author?.name || "YouTube",
+        author: p.author.name,
         url: p.url,
         type: "album",
         trackCount: p.videoCount
       }));
+
+      // Search artists and albums via Deezer with better filtering
+      let artists: any[] = [];
+      let dzAlbums: any[] = [];
+      try {
+        const [artRes, albRes, searchRes] = await Promise.all([
+           axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=15`),
+           axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=15`),
+           axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`)
+        ]);
+
+        artists = artRes.data.data.map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          title: a.name,
+          thumbnail: a.picture_medium,
+          type: "artist",
+          fans: a.nb_fan,
+          author: "Verified Artist"
+        }));
+
+        dzAlbums = albRes.data.data.map((a: any) => ({
+          id: a.id,
+          title: a.title,
+          thumbnail: a.cover_medium,
+          author: a.artist.name,
+          type: "album",
+          trackCount: a.nb_tracks || "Album"
+        }));
+
+        const dzTracks = searchRes.data.data.map((t: any) => ({
+          id: t.id,
+          title: t.title,
+          thumbnail: t.album.cover_medium,
+          author: t.artist.name,
+          url: `https://www.youtube.com/results?search_query=${encodeURIComponent(t.artist.name + ' ' + t.title)}`,
+          type: "track",
+          duration: t.duration
+        }));
+
+        res.json([...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos]);
+        return;
+      } catch (e) {
+        console.error("Deezer search failed:", e);
+      }
+
+      res.json([...artists, ...dzAlbums, ...playlists, ...videos]);
     } catch (error) {
-      console.error("YouTube search failed:", error);
+      console.error("Search error:", error);
+      res.status(500).json({ error: "Search failed" });
     }
-
-    // Always try Deezer so artist/song search still works even if YouTube is down.
-    try {
-      const [artRes, albRes, searchRes] = await Promise.all([
-        axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=15`),
-        axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=15`),
-        axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`)
-      ]);
-
-      artists = (artRes.data?.data || []).map((a: any) => ({
-        id: a.id,
-        name: a.name,
-        title: a.name,
-        thumbnail: a.picture_medium,
-        type: "artist",
-        fans: a.nb_fan,
-        author: "Verified Artist"
-      }));
-
-      dzAlbums = (albRes.data?.data || []).map((a: any) => ({
-        id: a.id,
-        title: a.title,
-        thumbnail: a.cover_medium,
-        author: a.artist?.name || "Unknown Artist",
-        type: "album",
-        trackCount: a.nb_tracks || "Album"
-      }));
-
-      dzTracks = (searchRes.data?.data || []).map((t: any) => ({
-        id: t.id,
-        title: t.title,
-        thumbnail: t.album?.cover_medium,
-        author: t.artist?.name || "Unknown Artist",
-        url: `https://www.youtube.com/results?search_query=${encodeURIComponent((t.artist?.name || "") + ' ' + t.title)}`,
-        type: "track",
-        duration: t.duration
-      }));
-    } catch (error) {
-      console.error("Deezer search failed:", error);
-    }
-
-    const payload = [...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos];
-    if (payload.length === 0) {
-      return res.status(503).json({ error: "Search providers unavailable" });
-    }
-
-    res.json(payload);
   });
 
   app.get("/api/artist/:id", async (req, res) => {
@@ -524,8 +357,8 @@ async function createApp() {
   });
 
   app.get("/api/info", async (req, res) => {
-    const rawUrl = req.query.url as string;
-    if (!rawUrl) return res.status(400).json({ error: "URL is required" });
+    const url = req.query.url as string;
+    if (!url) return res.status(400).json({ error: "URL is required" });
 
     try {
       const options = {
@@ -537,9 +370,7 @@ async function createApp() {
           }
         }
       };
-      const resolvedUrl = await resolvePlayableUrl(rawUrl);
-      if (!resolvedUrl) return res.status(404).json({ error: "No playable video found" });
-      const info = await ytdl.getInfo(resolvedUrl, options);
+      const info = await ytdl.getInfo(url, options);
       res.json({
         title: info.videoDetails.title,
         thumbnail: info.videoDetails.thumbnails[0].url || (info.videoDetails.thumbnails.length > 0 ? info.videoDetails.thumbnails[0].url : ""),
@@ -549,7 +380,7 @@ async function createApp() {
     } catch (error) {
       console.error("Error fetching video info with ytdl, trying yt-search fallback:", error);
       try {
-        const searchResults = await ytSearch(rawUrl);
+        const searchResults = await ytSearch(url);
         if (searchResults.videos.length > 0) {
           const v = searchResults.videos[0];
           return res.json({
@@ -567,31 +398,85 @@ async function createApp() {
   });
 
   app.get("/api/download", async (req, res) => {
-    const rawUrl = req.query.url as string;
-    const format = (req.query.format as string) || "mp4";
+    let url = req.query.url as string;
+    const format = req.query.format as string || "mp4";
 
-    if (!rawUrl) return res.status(400).json({ error: "URL is required" });
+    if (!url) return res.status(400).json({ error: "URL is required" });
+
+    // If it's a results page or just query text, search for the first video
+    if (!url.includes("watch?v=") && !url.includes("youtu.be/")) {
+      try {
+        const searchResults = await ytSearch(url);
+        if (searchResults.videos.length > 0) {
+          url = searchResults.videos[0].url;
+        } else {
+          return res.status(404).json({ error: "No video found for search query" });
+        }
+      } catch (err) {
+        return res.status(500).json({ error: "Search failed during download" });
+      }
+    }
+
+    const ytdlOptions: ytdl.downloadOptions = {
+      quality: format === "mp3" ? "highestaudio" : "highestvideo",
+      requestOptions: {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+          "Accept-Encoding": "identity",
+          "Accept-Language": "en-US,en;q=0.9",
+        }
+      },
+      filter: (format === "mp3" ? "audioonly" : "videoandaudio") as ytdl.Filter
+    };
 
     try {
-      const resolved = await resolvePlayableUrl(rawUrl);
-      if (!resolved) return res.status(404).json({ error: "No video found for query" });
-      const dl = await ytDownload(resolved);
-      const source = format === 'mp3' ? dl.audio?.url : dl.video?.url;
-      if (!source) return res.status(404).json({ error: `No ${format} source available` });
-      const upstream = await axios.get(source, { responseType: 'stream', timeout: 60000 });
-      const safeTitle = (dl.title || 'download').replace(/[^\w\s]/gi, '');
-      res.header('Content-Disposition', `attachment; filename="${safeTitle}.${format}"`);
-      res.header('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
-      upstream.data.pipe(res);
+      const info = await ytdl.getInfo(url, ytdlOptions);
+      const title = info.videoDetails.title.replace(/[^\w\s]/gi, "");
+      
+      if (format === "mp3") {
+        res.header("Content-Type", "audio/mpeg");
+      } else {
+        res.header("Content-Type", "video/mp4");
+      }
+      
+      res.header("Content-Disposition", `attachment; filename="${title}.${format}"`);
+      ytdl(url, ytdlOptions).pipe(res);
+      
     } catch (error) {
-      console.error("Download API failed:", error);
-      return res.status(500).json({ error: "Failed to get download link" });
+      console.error("YTDL download failed, trying fallback...", error);
+      
+      const fallbackUrl = await getFallbackStreamUrl(url);
+      if (fallbackUrl) {
+         if (format === "mp3") res.header("Content-Type", "audio/mpeg");
+         else res.header("Content-Type", "video/mp4");
+         res.header("Content-Disposition", `attachment; filename="download.${format}"`);
+         return proxyStream(fallbackUrl, res);
+      }
+
+      res.status(500).json({ error: "Download failed. YouTube's bot detection might be blocking this request." });
+    }
+  });
+
+  app.get("/api/trending", (req, res) => {
+    try {
+      res.json(trendingCache || []);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to serve trending cache" });
+    }
+  });
+
+  app.get("/api/daily-pick", (req, res) => {
+    try {
+      res.json(dailyPick || null);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to serve daily pick" });
     }
   });
 
   app.get("/api/stream", async (req, res) => {
-    const rawUrl = req.query.url as string;
-    if (!rawUrl) return res.status(400).json({ error: "URL is required" });
+    const url = req.query.url as string;
+    if (!url) return res.status(400).json({ error: "URL is required" });
 
     const ytdlOptions: ytdl.downloadOptions = {
       filter: "audioonly",
@@ -607,14 +492,12 @@ async function createApp() {
 
     try {
       res.setHeader("Content-Type", "audio/mpeg");
-      const resolvedUrl = await resolvePlayableUrl(rawUrl);
-      if (!resolvedUrl) return res.status(404).json({ error: "No playable video found" });
-      const stream = ytdl(resolvedUrl, ytdlOptions);
+      const stream = ytdl(url, ytdlOptions);
       
       stream.on('error', async (err: any) => {
         console.error("YTDL Stream Error:", err);
         if (!res.headersSent) {
-          const fallbackUrl = await getFallbackStreamUrl(resolvedUrl);
+          const fallbackUrl = await getFallbackStreamUrl(url);
           if (fallbackUrl) {
             return proxyStream(fallbackUrl, res);
           }
@@ -627,7 +510,7 @@ async function createApp() {
       stream.pipe(res);
     } catch (err) {
       console.error("YTDL outer catch:", err);
-      const fallbackUrl = await getFallbackStreamUrl(rawUrl);
+      const fallbackUrl = await getFallbackStreamUrl(url);
       if (fallbackUrl) {
         return proxyStream(fallbackUrl, res);
       }
@@ -776,16 +659,14 @@ async function createApp() {
     });
   });
 
-  const isVercel = process.env.VERCEL === "1";
-
-  // Vite middleware for local development only (not serverless)
-  if (process.env.NODE_ENV !== "production" && !isVercel) {
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else if (!isVercel) {
+  } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -793,28 +674,14 @@ async function createApp() {
     });
   }
 
-  appInstance = app;
-  if (trendingCache.length === 0) {
-    updateTrending();
-  }
-  return app;
-}
-
-async function startServer() {
-  const app = await createApp();
-  const PORT = Number(process.env.PORT || 3000);
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    
+    // Kick off trending update after server is listening
+    updateTrending();
   });
 }
 
-if (!process.env.VERCEL) {
-  startServer().catch((err) => {
-    console.error("Failed to start server:", err);
-  });
-}
-
-export default async function handler(req: express.Request, res: express.Response) {
-  const app = await createApp();
-  return app(req, res);
-}
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+});
