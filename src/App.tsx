@@ -411,6 +411,27 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+
+
+  // Auto-refresh visible feeds when user enters each section
+  useEffect(() => {
+    if (activeTab !== "home" && activeTab !== "trending" && activeTab !== "videos" && activeTab !== "artists") return;
+
+    if ((activeTab === "home" || activeTab === "trending") && trendingTracks.length === 0) {
+      fetch("/api/trending")
+        .then((res) => res.json())
+        .then((data) => setTrendingTracks(Array.isArray(data) ? data : []))
+        .catch(() => {});
+    }
+
+    if (activeTab === "artists" && featuredArtists.length === 0) {
+      fetch("/api/featured-artists")
+        .then((res) => res.json())
+        .then((data) => setFeaturedArtists(Array.isArray(data) ? data : []))
+        .catch(() => {});
+    }
+  }, [activeTab, trendingTracks.length, featuredArtists.length]);
+
   const handleAlbumClick = async (album: any) => {
     setFetchingAlbum(true);
     setSelectedAlbum(null);
@@ -452,16 +473,22 @@ export default function App() {
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!searchQuery) return;
+    const query = searchQuery.trim();
+    if (!query) return;
     setShowSuggestions(false);
     setIsSearching(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      if (!res.ok) throw new Error(`Search failed with status ${res.status}`);
       const data = await res.json();
-      setSearchResults(data);
+      const normalized = Array.isArray(data) ? data : [];
+      setSearchResults(normalized);
       setActiveTab("downloader");
+      if (normalized.length === 0) setErrorMessage("No search result found. Try another keyword.");
     } catch (err) {
       console.error("Search failed", err);
+      setSearchResults([]);
+      setErrorMessage("Search is not available right now. Please try again.");
     } finally {
       setIsSearching(false);
     }
@@ -647,7 +674,7 @@ export default function App() {
         </aside>
 
         {/* Main Area */}
-        <main className="flex-1 flex flex-col p-4 pt-20 md:pt-8 md:p-8 overflow-y-auto overflow-x-hidden relative pb-32 md:pb-8">
+        <main className="flex-1 flex flex-col p-4 pt-24 md:pt-8 md:p-8 overflow-y-auto overflow-x-hidden relative pb-36 md:pb-8">
           
           <AnimatePresence>
             {showWelcome && user && (
@@ -1261,7 +1288,7 @@ export default function App() {
         </main>
       </div>
 
-      <nav className="md:hidden fixed bottom-24 left-3 right-3 z-[110] rounded-2xl border border-white/10 bg-black/80 backdrop-blur-xl p-2 grid grid-cols-6 gap-1">
+      <nav className="md:hidden fixed bottom-4 left-3 right-3 z-[110] rounded-2xl border border-white/10 bg-black/85 backdrop-blur-xl px-3 pt-2.5 pb-[calc(0.75rem+env(safe-area-inset-bottom))] grid grid-cols-6 gap-1.5 shadow-2xl">
         {[
           { key: "home", icon: Home, label: "Home" },
           { key: "trending", icon: TrendingUp, label: "Trend" },
