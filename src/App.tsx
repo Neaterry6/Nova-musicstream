@@ -56,7 +56,9 @@ import {
   Clock,
   History as HistoryIcon,
   Monitor,
-  Smartphone
+  Smartphone,
+  Menu,
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, db, signInWithGoogle } from "./lib/firebase";
@@ -123,6 +125,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [trendingTracks, setTrendingTracks] = useState<any[]>([]);
   const [trendingCategory, setTrendingCategory] = useState("Trending");
+  const [featuredArtists, setFeaturedArtists] = useState<any[]>([]);
   const [searchSuggestions, setSearchSuggestions] = useState<any[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedAlbum, setSelectedAlbum] = useState<any | null>(null);
@@ -145,6 +148,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const audioRef = React.useRef<HTMLAudioElement>(null);
 
   // Offline URL Loader
@@ -377,6 +381,13 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
+  useEffect(() => {
+    fetch("/api/featured-artists")
+      .then((res) => res.json())
+      .then((data) => setFeaturedArtists(Array.isArray(data) ? data : []))
+      .catch(() => setFeaturedArtists([]));
+  }, []);
+
   // Trending Loader
   useEffect(() => {
     const fetchTrending = async (retries = 3) => {
@@ -530,15 +541,31 @@ export default function App() {
   }
 
   return (
-    <div className="relative h-screen w-full bg-[#070708] text-[#E0E0E0] font-sans flex flex-col overflow-hidden">
+    <div className="relative min-h-screen w-full bg-[#070708] text-[#E0E0E0] font-sans flex flex-col overflow-hidden">
       {/* Mesh Background */}
       <div className="absolute top-[-100px] left-[-100px] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[120px] pointer-events-none"></div>
       <div className="absolute bottom-[-100px] right-[-100px] w-[600px] h-[600px] bg-blue-500/10 rounded-full blur-[150px] pointer-events-none"></div>
 
       <div className="relative z-10 flex flex-1 overflow-hidden">
         
+        <button
+          onClick={() => setSidebarOpen((prev) => !prev)}
+          className="md:hidden fixed top-4 left-4 z-[130] w-11 h-11 rounded-xl bg-black/60 border border-white/20 backdrop-blur-xl flex items-center justify-center"
+          aria-label={sidebarOpen ? "Close menu" : "Open menu"}
+        >
+          {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+        </button>
+
+        {sidebarOpen && (
+          <button
+            className="md:hidden fixed inset-0 z-[115] bg-black/50"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar overlay"
+          />
+        )}
+
         {/* Sidebar */}
-        <aside className="w-64 backdrop-blur-xl bg-white/5 border-r border-white/10 flex flex-col p-6">
+        <aside className={`fixed md:relative inset-y-0 left-0 z-[120] w-72 md:w-64 backdrop-blur-xl bg-[#0c0c0e]/95 md:bg-white/5 border-r border-white/10 flex flex-col p-6 transform transition-transform duration-300 ${sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
           <div className="flex items-center gap-3 mb-10">
             <div className="w-8 h-8 bg-magenta rounded-full flex items-center justify-center">
               <Star size={16} color="black" />
@@ -549,11 +576,11 @@ export default function App() {
           <nav className="space-y-6 flex-1 overflow-y-auto no-scrollbar">
             <div className="space-y-2">
               <p className="text-[10px] uppercase tracking-[0.2em] text-white/40 font-bold px-2">Menu</p>
-              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={() => setActiveTab("home")} />
-              <SidebarItem icon={<TrendingUp size={20} />} label="Trending" active={activeTab === "trending"} onClick={() => setActiveTab("trending")} />
-              <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
-              <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => setActiveTab("shazam")} />
-              <SidebarItem icon={<Download size={20} />} label="Downloader" active={activeTab === "downloader"} onClick={() => setActiveTab("downloader")} />
+              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={() => { setActiveTab("home"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<TrendingUp size={20} />} label="Trending" active={activeTab === "trending"} onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => { setActiveTab("videos"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => { setActiveTab("shazam"); setSidebarOpen(false); }} />
+              <SidebarItem icon={<Download size={20} />} label="Downloader" active={activeTab === "downloader"} onClick={() => { setActiveTab("downloader"); setSidebarOpen(false); }} />
               {isAdmin && (
                 <SidebarItem icon={<ShieldCheck size={20} className="text-magenta" />} label="Admin Panel" active={activeTab === "admin"} onClick={() => setActiveTab("admin")} />
               )}
@@ -568,7 +595,7 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <SidebarItem icon={<WifiOff size={20} />} label="Offline" active={activeTab === "offline"} onClick={() => setActiveTab("offline")} />
+              <SidebarItem icon={<WifiOff size={20} />} label="Offline" active={activeTab === "offline"} onClick={() => { setActiveTab("offline"); setSidebarOpen(false); }} />
               <div className="space-y-1">
                 {playlists.map(p => (
                   <SidebarPlaylist key={p.id} name={p.name} onClick={() => { setActiveTab(`playlist-${p.id}`) }} />
@@ -610,7 +637,7 @@ export default function App() {
         </aside>
 
         {/* Main Area */}
-        <main className="flex-1 flex flex-col p-8 overflow-y-auto overflow-x-hidden relative">
+        <main className="flex-1 flex flex-col p-4 pt-20 md:pt-8 md:p-8 overflow-y-auto overflow-x-hidden relative pb-32 md:pb-8">
           
           <AnimatePresence>
             {showWelcome && user && (
@@ -641,7 +668,11 @@ export default function App() {
           </AnimatePresence>
 
           {/* Header Search Bar */}
-          <div className="flex items-center justify-center mb-10 relative z-[95]">
+          <div className="md:hidden flex items-center gap-2 overflow-x-auto no-scrollbar mb-4">
+            {["home","trending","videos","downloader","offline"].map((tab)=>(<button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 rounded-full text-[10px] uppercase font-black tracking-widest whitespace-nowrap ${activeTab===tab?"mixed-gradient text-white":"bg-white/5 text-white/50"}`}>{tab}</button>))}
+          </div>
+
+          <div className="flex items-center justify-center mb-6 md:mb-10 relative z-[95]">
             <form onSubmit={handleSearch} className="relative w-full max-w-2xl group">
               <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-white/30 group-focus-within:text-magenta transition-colors" size={20} />
               <input 
@@ -771,7 +802,7 @@ export default function App() {
                           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Global Hits</p>
                        </div>
                     </div>
-                    <button onClick={() => setActiveTab("trending")} className="text-[10px] text-white/40 hover:text-magenta uppercase font-black tracking-widest transition-colors">View More</button>
+                    <button onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} className="text-[10px] text-white/40 hover:text-magenta uppercase font-black tracking-widest transition-colors">View More</button>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-8">
                     {trendingTracks.filter(t => t.type === 'track').slice(0, 6).map((t) => (
@@ -853,31 +884,23 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex gap-8 overflow-x-auto no-scrollbar pb-6 -mx-4 px-4">
-                    {[
-                      { id: 27, name: 'Daft Punk', img: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c9484f380a9370f37d50/500x500.jpg' },
-                      { id: 13, name: 'Eminem', img: 'https://e-cdns-images.dzcdn.net/images/artist/19543ad22da6e03946014e5cae285a8a/500x500.jpg' },
-                      { id: 1, name: 'The Beatles', img: 'https://e-cdns-images.dzcdn.net/images/artist/0bf0f45532298c440a77519a868424a7/500x500.jpg' },
-                      { id: 412, name: 'Queen', img: 'https://e-cdns-images.dzcdn.net/images/artist/Queen/500x500.jpg' },
-                      { id: 119, name: 'Metallica', img: 'https://e-cdns-images.dzcdn.net/images/artist/Metallica/500x500.jpg' },
-                      { id: 5092, name: 'Pink Floyd', img: 'https://e-cdns-images.dzcdn.net/images/artist/PinkFloyd/500x500.jpg' },
-                      { id: 144227, name: 'Drake', img: 'https://e-cdns-images.dzcdn.net/images/artist/Drake/500x500.jpg' },
-                      { id: 1045, name: 'Coldplay', img: 'https://e-cdns-images.dzcdn.net/images/artist/080df105c973022c6019bd375f928aad/500x500.jpg' }
-                    ].map(art => (
+                    {featuredArtists.map((art, idx) => (
                       <div 
-                        key={art.id} 
-                        onClick={() => handleArtistClick(art)}
+                        key={`${art.name}-${idx}`} 
+                        onClick={() => { setSearchQuery(art.name); handleSearch(); }}
                         className="w-44 shrink-0 group cursor-pointer space-y-4"
                       >
                         <div className="relative aspect-square rounded-full overflow-hidden border-2 border-white/5 group-hover:border-magenta transition-all shadow-2xl">
-                          <img src={art.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={art.name} />
+                          <div className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 bg-gradient-to-br from-magenta/30 via-blue-500/20 to-emerald-500/20 flex items-center justify-center p-3 text-center">
+                            <span className="font-black text-xs uppercase tracking-wider">{art.name}</span>
+                          </div>
                           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
                             <ArrowRight className="text-white" />
                           </div>
                         </div>
                         <p className="text-center font-black italic uppercase tracking-tighter text-sm group-hover:text-magenta transition-colors">{art.name}</p>
                       </div>
-                    ))}
-                  </div>
+                    ))}                  </div>
                 </div>
 
                 <div className="space-y-12">
@@ -965,7 +988,7 @@ export default function App() {
                                <button onClick={() => { if (selectedAlbum.tracks?.[0]) { setCurrentTrack(selectedAlbum.tracks[0]); setIsPlaying(true); } }} className="px-10 py-4 mixed-gradient rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-3">
                                   <Play fill="white" stroke="none" size={16} /> Stream Album
                                </button>
-                               <button onClick={() => setActiveTab("trending")} className="px-10 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-black uppercase tracking-widest text-xs border border-white/10 text-white/60">Back</button>
+                               <button onClick={() => { setActiveTab("trending"); setSidebarOpen(false); }} className="px-10 py-4 bg-white/5 hover:bg-white/10 rounded-2xl font-black uppercase tracking-widest text-xs border border-white/10 text-white/60">Back</button>
                             </div>
                          </div>
                       </div>
