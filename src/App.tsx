@@ -56,7 +56,9 @@ import {
   Clock,
   History as HistoryIcon,
   Monitor,
-  Smartphone
+  Smartphone,
+  Menu,
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, db, signInWithGoogle } from "./lib/firebase";
@@ -69,12 +71,15 @@ import {
   addDoc, 
   deleteDoc, 
   doc, 
+  getDoc,
   setDoc,
   updateDoc, 
   arrayUnion, 
   arrayRemove,
   serverTimestamp,
-  getDocs
+  getDocs,
+  orderBy,
+  limit
 } from "firebase/firestore";
 import { get, set, del, keys } from "idb-keyval";
 
@@ -99,12 +104,76 @@ interface Playlist {
 // --- Contexts ---
 const AuthContext = createContext<{ user: User | null; loading: boolean }>({ user: null, loading: true });
 
-// --- Mock / Init Data ---
-const FEATURED_PLAYLISTS = [
-  { id: "1", title: "Midnight City", author: "Electronic", cover: "https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400&h=400&fit=crop" },
-  { id: "2", title: "Indie Chill", author: "Acoustic", cover: "https://images.unsplash.com/photo-1459749411177-042180ce673c?w=400&h=400&fit=crop" },
-  { id: "3", title: "Lo-Fi Beats", author: "Relaxation", cover: "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=400&h=400&fit=crop" },
-];
+// --- Components ---
+
+function AudioVisualizer({ audioRef }: { audioRef: React.RefObject<HTMLAudioElement | null> }) {
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const contextRef = React.useRef<AudioContext | null>(null);
+  const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
+  const analyzerRef = React.useRef<AnalyserNode | null>(null);
+
+  useEffect(() => {
+    if (!audioRef.current || !canvasRef.current) return;
+
+    const audio = audioRef.current;
+    
+    const initAudio = () => {
+      if (!contextRef.current) {
+        contextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        analyzerRef.current = contextRef.current.createAnalyser();
+        sourceRef.current = contextRef.current.createMediaElementSource(audio);
+        sourceRef.current.connect(analyzerRef.current);
+        analyzerRef.current.connect(contextRef.current.destination);
+        analyzerRef.current.fftSize = 256;
+      }
+    };
+
+    const draw = () => {
+      if (!canvasRef.current || !analyzerRef.current) return;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const bufferLength = analyzerRef.current.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyzerRef.current.getByteFrequencyData(dataArray);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      const barWidth = (canvas.width / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = (dataArray[i] / 2) * (canvas.height / 128);
+        
+        // Use brand color logic
+        const brandColor = getComputedStyle(document.documentElement).getPropertyValue('--brand-color').trim() || '#10B981';
+        ctx.fillStyle = brandColor;
+        ctx.globalAlpha = 0.6;
+        
+        // Draw bars from middle if high or just regular bars
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+      
+      requestAnimationFrame(draw);
+    };
+
+    audio.addEventListener('play', () => {
+      initAudio();
+      if (contextRef.current?.state === 'suspended') {
+        contextRef.current.resume();
+      }
+    });
+
+    draw();
+  }, [audioRef]);
+
+  return <canvas ref={canvasRef} width={200} height={40} className="w-full h-full opacity-60" />;
+}
+
+// --- Sidebar Components ---
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -132,12 +201,17 @@ export default function App() {
   const [showLyrics, setShowLyrics] = useState(false);
   const [lyricsData, setLyricsData] = useState<any>(null);
   const [loadingLyrics, setLoadingLyrics] = useState(false);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [showWelcome, setShowWelcome] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [downloadModal, setDownloadModal] = useState<any | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dailyPick, setDailyPick] = useState<any | null>(null);
   const [recommendations, setRecommendations] = useState<Track[]>([]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [theme, setTheme] = useState<string>(localStorage.getItem('theme') || 'emerald');
+  const [downloadQueue, setDownloadQueue] = useState<any[]>([]);
+  const [searchType, setSearchType] = useState("all");
+  const [searchGenre, setSearchGenre] = useState("all");
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [sleepTimer, setSleepTimer] = useState<number | null>(null);
   const [history, setHistory] = useState<Track[]>([]);
@@ -145,7 +219,12 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
+  const [playbackQueue, setPlaybackQueue] = useState<Track[]>([]);
+  const [queueIndex, setQueueIndex] = useState(-1);
+  const [showQueue, setShowQueue] = useState(false);
   const audioRef = React.useRef<HTMLAudioElement>(null);
+  const analyzerRef = React.useRef<AnalyserNode | null>(null);
+  const animationFrameRef = React.useRef<number | null>(null);
 
   // Offline URL Loader
   useEffect(() => {
@@ -191,6 +270,74 @@ export default function App() {
     }
   }, [isPlaying, currentTrack]);
 
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, isPlaying, currentTrack]);
+
+  // Refined Download Progress Simulation with stages
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDownloadQueue(prev => prev.map(item => {
+        if (item.status === 'downloading' && item.progress < 100) {
+          const newProgress = Math.min(item.progress + Math.random() * 8, 100);
+          
+          let subStatus = "Connecting...";
+          if (newProgress > 10 && newProgress <= 30) subStatus = "Fetching metadata...";
+          if (newProgress > 30 && newProgress <= 60) subStatus = "Encoding audio stream...";
+          if (newProgress > 60 && newProgress <= 85) subStatus = "Compiling binary chunks...";
+          if (newProgress > 85 && newProgress < 100) subStatus = "Finalizing encryption...";
+          if (newProgress === 100) subStatus = "Completed";
+
+          const elapsed = Date.now() - item.startTime;
+          const totalEst = (elapsed / newProgress) * 100;
+          const remaining = Math.max(0, totalEst - elapsed);
+          const remSecs = Math.ceil(remaining / 1000);
+          
+          return { 
+            ...item, 
+            progress: newProgress,
+            subStatus,
+            status: newProgress === 100 ? 'completed' : 'downloading',
+            estimatedTime: newProgress === 100 ? 'Done' : `${Math.floor(remSecs / 60)}m ${remSecs % 60}s`
+          };
+        }
+        return item;
+      }));
+    }, 1500);
+    return () => clearInterval(interval);
+  }, []);
+
+  const [showRequestModal, setShowRequestModal] = useState(false);
+  const [requestSongName, setRequestSongName] = useState("");
+  const [requestArtist, setRequestArtist] = useState("");
+
+  const submitRequest = async () => {
+    if (!user) {
+      setErrorMessage("Identity verification required for requests. Login first.");
+      return;
+    }
+    if (!requestSongName) return;
+    try {
+      await addDoc(collection(db, "song-requests"), {
+        songName: requestSongName,
+        artist: requestArtist,
+        requesterEmail: user.email,
+        requesterId: user.uid,
+        status: 'pending',
+        createdAt: serverTimestamp()
+      });
+      setRequestSongName("");
+      setRequestArtist("");
+      setShowRequestModal(false);
+      setErrorMessage("Request emitted to the Nexus. Stay tuned.");
+    } catch (err) {
+      console.error("Request failed", err);
+      setErrorMessage("Request broadcast failed. System interference detected.");
+    }
+  };
+
   const handleTimeUpdate = () => {
     if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
   };
@@ -199,13 +346,77 @@ export default function App() {
     if (audioRef.current) setDuration(audioRef.current.duration);
   };
 
+  const playTrack = (track: Track, context?: Track[]) => {
+    if (context) {
+      setPlaybackQueue(context);
+      const idx = context.findIndex(t => t.id === track.id);
+      setQueueIndex(idx !== -1 ? idx : 0);
+    } else {
+      // If no context, just add to current queue or replace
+      setPlaybackQueue([track]);
+      setQueueIndex(0);
+    }
+    setCurrentTrack(track);
+    setIsPlaying(true);
+  };
+
   const playNext = () => {
-    // Basic implementation: play a random trending song if no playlist is active
-    if (trendingTracks.length > 0) {
+    if (playbackQueue.length > 0 && queueIndex < playbackQueue.length - 1) {
+      const nextIdx = queueIndex + 1;
+      setQueueIndex(nextIdx);
+      setCurrentTrack(playbackQueue[nextIdx]);
+      setIsPlaying(true);
+    } else if (trendingTracks.length > 0) {
       const idx = Math.floor(Math.random() * trendingTracks.length);
       setCurrentTrack(trendingTracks[idx]);
       setIsPlaying(true);
     }
+  };
+
+  const playPrevious = () => {
+    if (playbackQueue.length > 0 && queueIndex > 0) {
+      const prevIdx = queueIndex - 1;
+      setQueueIndex(prevIdx);
+      setCurrentTrack(playbackQueue[prevIdx]);
+      setIsPlaying(true);
+    }
+  };
+
+  const removeFromQueue = (index: number) => {
+    setPlaybackQueue(prev => {
+      const newQueue = [...prev];
+      newQueue.splice(index, 1);
+      if (index === queueIndex) {
+        // If we removed the current track, play next if possible
+        if (newQueue.length > 0) {
+           const nextIdx = Math.min(index, newQueue.length - 1);
+           setQueueIndex(nextIdx);
+           setCurrentTrack(newQueue[nextIdx]);
+        } else {
+           setCurrentTrack(null);
+           setIsPlaying(false);
+           setQueueIndex(-1);
+        }
+      } else if (index < queueIndex) {
+        setQueueIndex(queueIndex - 1);
+      }
+      return newQueue;
+    });
+  };
+
+  const reorderQueue = (fromIdx: number, toIdx: number) => {
+    setPlaybackQueue(prev => {
+      const newQueue = [...prev];
+      const [removed] = newQueue.splice(fromIdx, 1);
+      newQueue.splice(toIdx, 0, removed);
+      
+      // Update queueIndex
+      if (queueIndex === fromIdx) setQueueIndex(toIdx);
+      else if (queueIndex > fromIdx && queueIndex <= toIdx) setQueueIndex(queueIndex - 1);
+      else if (queueIndex < fromIdx && queueIndex >= toIdx) setQueueIndex(queueIndex + 1);
+      
+      return newQueue;
+    });
   };
 
   const seek = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -229,17 +440,30 @@ export default function App() {
       setInstallPrompt(e);
     });
 
-    const fetchDailyPick = async (retries = 3) => {
+    const fetchDailyPick = async (retries = 10) => {
       try {
         const res = await fetch("/api/daily-pick");
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         const data = await res.json();
-        if (data) setDailyPick(data);
-      } catch (err) {
-        console.error("Daily pick fetch failed", err);
+        if (data) {
+          setDailyPick(data);
+        } else {
+          // If null returned, use a fallback
+          setDailyPick({
+            id: "hTWKbfoikeg",
+            title: "Global Viral Mix 2026",
+            author: "MusicFlow Discovery",
+            thumbnail: "https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400",
+            duration: "1:02:40",
+            url: "https://www.youtube.com/watch?v=hTWKbfoikeg",
+            type: "track"
+          });
+        }
+      } catch (err: any) {
+        console.error("Daily pick fetch failed:", err?.message || err);
         if (retries > 0) {
-          console.log(`Retrying daily pick fetch... (${retries} left)`);
-          setTimeout(() => fetchDailyPick(retries - 1), 2000);
+          const delay = Math.min((11 - retries) * 2000, 30000); // Backoff
+          setTimeout(() => fetchDailyPick(retries - 1), delay);
         }
       }
     };
@@ -290,14 +514,36 @@ export default function App() {
     return onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u) {
+        try {
+          const userDocRef = doc(db, "users", u.uid);
+          const uSnap = await getDoc(userDocRef);
+          if (uSnap.exists()) {
+             const data = uSnap.data();
+             if (data.role === 'admin') setIsAdmin(true);
+             if (data.themePreference) setTheme(data.themePreference);
+          } else {
+             await setDoc(userDocRef, {
+               userId: u.uid,
+               displayName: u.displayName,
+               email: u.email,
+               photoURL: u.photoURL,
+               role: u.email === 'akewusholaabdulbakri101@gmail.com' ? 'admin' : 'user',
+               createdAt: serverTimestamp()
+             });
+             if (u.email === 'akewusholaabdulbakri101@gmail.com') setIsAdmin(true);
+          }
+        } catch (e) {
+          console.error("User profile sync failed:", e);
+        }
+
         if (u.email === 'akewusholaabdulbakri101@gmail.com') {
           setIsAdmin(true);
         } else {
           try {
             const adminDoc = await getDocs(query(collection(db, "admins"), where("email", "==", u.email)));
-            setIsAdmin(!adminDoc.empty);
+            if (!adminDoc.empty) setIsAdmin(true);
           } catch {
-            setIsAdmin(false);
+            // Already set by profile possibly
           }
         }
       } else {
@@ -377,26 +623,31 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Trending Loader
-  useEffect(() => {
-    const fetchTrending = async (retries = 3) => {
-      try {
-        const res = await fetch("/api/trending");
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        const data = await res.json();
-        if (data && Array.isArray(data)) {
-          setTrendingTracks(data);
-        }
-      } catch (err) {
-        console.error("Failed to fetch trending", err);
-        if (retries > 0) {
-          console.log(`Retrying trending fetch... (${retries} left)`);
-          setTimeout(() => fetchTrending(retries - 1), 2000);
-        }
+  const fetchTrending = async (retries = 10) => {
+    try {
+      const res = await fetch("/api/trending");
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const data = await res.json();
+      if (data && Array.isArray(data) && data.length > 0) {
+        // Deduplicate here just in case server missed some
+        const uniqueMap = new Map();
+        data.forEach((t: any) => {
+          if (t.id && !uniqueMap.has(t.id)) uniqueMap.set(t.id, t);
+        });
+        setTrendingTracks(Array.from(uniqueMap.values()));
       }
-    };
+    } catch (err: any) {
+      console.error("Failed to fetch trending:", err?.message || err);
+      if (retries > 0) {
+        const delay = Math.min((11 - retries) * 2000, 30000); // Backoff
+        setTimeout(() => fetchTrending(retries - 1), delay);
+      }
+    }
+  };
+
+  useEffect(() => {
     fetchTrending();
-    const interval = setInterval(() => fetchTrending(0), 5 * 60 * 1000);
+    const interval = setInterval(() => fetchTrending(0), 10 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -436,7 +687,7 @@ export default function App() {
     setShowSuggestions(false);
     setIsSearching(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}&type=${searchType}&genre=${searchGenre}`);
       const data = await res.json();
       setSearchResults(data);
       setActiveTab("downloader");
@@ -454,6 +705,20 @@ export default function App() {
     }
     setDownloading(video.id);
     setDownloadModal(null);
+    
+    // Add to visual download queue
+    const queueItem = {
+      id: video.id,
+      title: video.title,
+      artist: video.artist || video.author,
+      thumbnail: video.thumbnail || video.cover,
+      progress: 0,
+      status: 'downloading',
+      estimatedTime: 'Calculating...',
+      startTime: Date.now(),
+    };
+    setDownloadQueue(prev => [...prev, queueItem]);
+
     try {
       const res = await fetch(`/api/download?url=${encodeURIComponent(video.url)}&format=${format}`);
       const blob = await res.blob();
@@ -480,10 +745,12 @@ export default function App() {
         document.body.removeChild(a);
       }
       setDownloading(null);
+      setDownloadQueue(prev => prev.map(item => item.id === video.id ? { ...item, progress: 100, status: 'completed' } : item));
     } catch (err: any) {
       console.error("Download failed", err);
       setErrorMessage("Download failed: YouTube blocked the request. Try streaming instead.");
       setDownloading(null);
+      setDownloadQueue(prev => prev.map(item => item.id === video.id ? { ...item, status: 'failed' } : item));
     }
   };
 
@@ -537,13 +804,31 @@ export default function App() {
 
       <div className="relative z-10 flex flex-1 overflow-hidden">
         
+        {/* Sidebar Overlay (Mobile) */}
+        <AnimatePresence>
+          {isSidebarOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSidebarOpen(false)}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[150] lg:hidden"
+            />
+          )}
+        </AnimatePresence>
+
         {/* Sidebar */}
-        <aside className="w-64 backdrop-blur-xl bg-white/5 border-r border-white/10 flex flex-col p-6">
-          <div className="flex items-center gap-3 mb-10">
-            <div className="w-8 h-8 bg-magenta rounded-full flex items-center justify-center">
-              <Star size={16} color="black" />
+        <aside className={`fixed inset-y-0 left-0 w-64 backdrop-blur-xl bg-black/40 lg:bg-white/5 border-r border-white/10 flex flex-col p-6 z-[200] transition-transform duration-300 lg:relative lg:translate-x-0 ${isSidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+          <div className="flex items-center justify-between mb-10 lg:block">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center">
+                <Music2 size={16} color="black" />
+              </div>
+              <span className="text-xl font-bold tracking-tight text-white">SoundSync</span>
             </div>
-            <span className="text-xl font-bold tracking-tight text-white italic">Nova MusicFlow</span>
+            <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden text-white/40">
+              <X size={20} />
+            </button>
           </div>
 
           <nav className="space-y-6 flex-1 overflow-y-auto no-scrollbar">
@@ -554,6 +839,8 @@ export default function App() {
               <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
               <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => setActiveTab("shazam")} />
               <SidebarItem icon={<Download size={20} />} label="Downloader" active={activeTab === "downloader"} onClick={() => setActiveTab("downloader")} />
+              <SidebarItem icon={<WifiOff size={20} className={offlineTracks.length > 0 ? "text-emerald-400" : ""} />} label="Offline Library" active={activeTab === "offline"} onClick={() => setActiveTab("offline")} />
+              <SidebarItem icon={<Megaphone size={20} className="text-[var(--brand-color)]" />} label="Request Song" onClick={() => setShowRequestModal(true)} />
               {isAdmin && (
                 <SidebarItem icon={<ShieldCheck size={20} className="text-magenta" />} label="Admin Panel" active={activeTab === "admin"} onClick={() => setActiveTab("admin")} />
               )}
@@ -578,14 +865,25 @@ export default function App() {
           </nav>
 
           <div className="mt-auto border-t border-white/10 pt-6 space-y-4">
-            <div className="flex items-center justify-between px-2">
-              <span className="text-[10px] uppercase font-bold text-white/30">Theme</span>
-              <button 
-                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-                className="p-2 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-white/40 hover:text-white"
-              >
-                {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-              </button>
+            <div className="px-2">
+              <span className="text-[10px] uppercase font-black tracking-widest text-white/20 block mb-3">System Aesthetics</span>
+              <div className="flex items-center gap-2">
+                {[
+                  { id: 'emerald', color: '#10B981' },
+                  { id: 'magenta', color: '#FF00FF' },
+                  { id: 'blue', color: '#00F2FF' },
+                  { id: 'orange', color: '#F97316' },
+                  { id: 'purple', color: '#8B5CF6' }
+                ].map(t => (
+                  <button 
+                    key={t.id}
+                    onClick={() => setTheme(t.id)}
+                    title={t.id}
+                    className={`w-6 h-6 rounded-full border-2 transition-all ${theme === t.id ? 'border-white scale-125' : 'border-transparent opacity-40 hover:opacity-100 hover:scale-110'}`}
+                    style={{ backgroundColor: t.color }}
+                  />
+                ))}
+              </div>
             </div>
 
             {user ? (
@@ -610,8 +908,24 @@ export default function App() {
         </aside>
 
         {/* Main Area */}
-        <main className="flex-1 flex flex-col p-8 overflow-y-auto overflow-x-hidden relative">
+        <main className="flex-1 flex flex-col p-4 md:p-8 overflow-y-auto overflow-x-hidden relative pb-44 lg:pb-32">
           
+          {/* Mobile Header */}
+          <div className="flex lg:hidden items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 text-white/40">
+                <Menu size={24} />
+              </button>
+              <button onClick={() => setProfileOpen(!profileOpen)} className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center overflow-hidden">
+                 {user ? <img src={user.photoURL || undefined} className="w-full h-full object-cover" alt="p" /> : <UserIcon size={20} className="text-white/40" />}
+              </button>
+            </div>
+            <h1 className="text-2xl font-black text-emerald-400">SoundSync</h1>
+            <button onClick={() => setActiveTab("profile")} className="text-white/40">
+              <Settings size={24} />
+            </button>
+          </div>
+
           <AnimatePresence>
             {showWelcome && user && (
               <motion.div 
@@ -678,165 +992,130 @@ export default function App() {
                   </motion.div>
                 )}
               </AnimatePresence>
+
+              {/* Search Filters */}
+              <div className="flex flex-wrap items-center gap-2 mt-4 ml-2">
+                <span className="text-[10px] uppercase font-black text-white/20 mr-2">Filters:</span>
+                {['all', 'track', 'album', 'artist'].map(t => (
+                  <button 
+                    key={t}
+                    type="button"
+                    onClick={() => setSearchType(t)}
+                    className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${searchType === t ? 'bg-[var(--brand-color)] text-black border-[var(--brand-color)]' : 'bg-white/5 border-white/10 text-white/40 hover:text-white'}`}
+                  >
+                    {t}
+                  </button>
+                ))}
+                <div className="w-px h-4 bg-white/10 mx-2" />
+                {['all', 'Pop', 'Hip-Hop', 'Naija', 'Amapiano', 'Drill'].map(g => (
+                  <button 
+                    key={g}
+                    type="button"
+                    onClick={() => setSearchGenre(g)}
+                    className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all ${searchGenre === g ? 'bg-[var(--brand-color)] text-black border-[var(--brand-color)]' : 'bg-white/5 border-white/10 text-white/40 hover:text-white'}`}
+                  >
+                    {g}
+                  </button>
+                ))}
+              </div>
             </form>
           </div>
 
           <AnimatePresence mode="wait">
             {activeTab === "home" && (
-              <motion.div key="home" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-16">
-                {/* Daily Pick Section */}
-                {dailyPick && (
-                  <section className="relative overflow-hidden p-1 bg-gradient-to-br from-magenta via-purple-600 to-blue-600 rounded-[3.5rem] shadow-2xl">
-                    <div className="bg-[#070708] rounded-[3.2rem] p-10 flex flex-col md:flex-row items-center gap-10">
-                      <div className="w-52 h-52 shrink-0 rounded-3xl overflow-hidden shadow-2xl rotate-3 group-hover:rotate-0 transition-transform duration-500">
-                        {dailyPick.thumbnail ? (
-                          <img src={dailyPick.thumbnail} className="w-full h-full object-cover" alt="daily" />
-                        ) : (
-                          <div className="w-full h-full bg-white/5 flex items-center justify-center"><MusicIcon className="text-white/20" /></div>
-                        )}
-                      </div>
-                      <div className="flex-1 space-y-4">
-                        <div className="flex items-center gap-2">
-                          <Star className="text-magenta fill-magenta" size={20} />
-                          <span className="text-xs font-black uppercase tracking-[0.4em] text-white/40">Daily Frequency Pick</span>
-                        </div>
-                        <h2 className="text-5xl font-black uppercase italic tracking-tighter text-white">{dailyPick.title}</h2>
-                        <p className="text-white/30 font-bold uppercase tracking-widest text-sm">{dailyPick.author}</p>
-                        <div className="flex gap-4 pt-4">
-                          <button 
-                            onClick={() => { setCurrentTrack({ ...dailyPick, cover: dailyPick.thumbnail, artist: dailyPick.author }); setIsPlaying(true); }}
-                            className="px-10 py-4 mixed-gradient text-white rounded-2xl font-black uppercase tracking-widest text-xs shadow-xl active:scale-95 transition-all"
-                          >
-                            Stream & Listen Today
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                {/* Hero Section */}
-                <div className="relative group overflow-hidden rounded-[4rem] border border-white/10 aspect-[21/9] bg-[#1A1A1A] shadow-2xl">
-                  <img src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=1200" className="w-full h-full object-cover opacity-60 group-hover:scale-105 transition-transform duration-[8s]" alt="Hero" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent"></div>
-                  <div className="absolute bottom-12 left-12 z-20 space-y-6">
-                    <span className="bg-magenta text-white text-[10px] font-black px-4 py-2 rounded-full uppercase tracking-[0.3em] font-display italic">Editor's Choice</span>
-                    <div className="space-y-1">
-                      <h2 className="text-7xl font-black text-white leading-none uppercase italic tracking-tighter">Hyper Pop</h2>
-                      <p className="text-white/40 text-2xl font-black uppercase italic tracking-widest">Next-Gen Audio Experience</p>
-                    </div>
-                    <button className="mixed-gradient text-white px-16 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:scale-110 active:scale-95 transition-all shadow-2xl">Start Listening</button>
-                  </div>
+              <motion.div key="home" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-12">
+                
+                {/* Search Bar (matches SoundSync design) */}
+                <div className="relative group w-full max-w-2xl mx-auto mb-8">
+                  <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-white/30 group-focus-within:text-emerald-400 transition-colors" size={20} />
+                  <input 
+                    type="text" 
+                    placeholder="Search songs, artists, albums..." 
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-14 text-base outline-none focus:ring-1 focus:ring-emerald-400/50 transition-all backdrop-blur-xl"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
                 </div>
 
-                {/* Smart Recommendations */}
-                {recommendations.length > 0 && (
-                  <section className="space-y-8">
-                    <div className="flex items-center gap-4">
-                       <div className="w-12 h-12 rounded-2xl bg-magenta/10 border border-magenta/20 flex items-center justify-center"><Sparkles size={24} className="text-magenta"/></div>
-                       <div>
-                          <h3 className="text-3xl font-black italic tracking-tighter uppercase leading-none">Smart Flow</h3>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Because you listened to {currentTrack?.artist}</p>
+                {/* Daily Pick Section */}
+                {dailyPick && (
+                  <section className="relative overflow-hidden rounded-[3rem] p-10 md:p-16 border border-white/10 group bg-white/[0.02]">
+                    <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-blue-500/10 pointer-events-none" />
+                    <div className="relative z-10 flex flex-col md:flex-row items-center gap-12">
+                       <div className="w-64 h-64 md:w-80 md:h-80 rounded-[3rem] overflow-hidden shadow-2xl border border-white/20 group">
+                          <img src={dailyPick.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-[3s]" alt="daily" />
                        </div>
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-8">
-                      {recommendations.map((t) => (
-                        <div 
-                          key={t.id} 
-                          onClick={() => { setCurrentTrack(t); setIsPlaying(true); }}
-                          className="flex items-center gap-4 p-4 bg-white/5 border border-white/10 rounded-2xl hover:bg-white/10 transition-all cursor-pointer group"
-                        >
-                        {t.cover ? (
-                          <img src={t.cover} className="w-16 h-16 rounded-xl object-cover shrink-0" alt="r" />
-                        ) : (
-                          <div className="w-16 h-16 rounded-xl bg-white/5 flex items-center justify-center shrink-0"><MusicIcon className="text-white/20" size={16} /></div>
-                        )}
-                          <div className="min-w-0">
-                             <p className="text-sm font-bold text-white truncate">{t.title}</p>
-                             <p className="text-[10px] text-white/30 truncate mt-1">{t.artist}</p>
+                       <div className="space-y-6 flex-1 text-center md:text-left">
+                          <div>
+                            <p className="text-[10px] uppercase font-black tracking-[0.6em] text-emerald-400 mb-2 italic">Daily Resonance</p>
+                            <h2 className="text-6xl md:text-8xl font-black italic uppercase tracking-[ -0.05em] leading-none mb-4">{dailyPick.title}</h2>
+                            <p className="text-xl md:text-2xl font-black text-white/40 uppercase tracking-tighter italic">{dailyPick.author}</p>
                           </div>
-                        </div>
-                      ))}
+                          <div className="flex flex-wrap items-center justify-center md:justify-start gap-4">
+                            <button onClick={() => { setCurrentTrack({ ...dailyPick, cover: dailyPick.thumbnail, artist: dailyPick.author }); setIsPlaying(true); }} className="px-12 py-5 bg-white text-black rounded-full font-black uppercase italic tracking-widest text-sm hover:scale-105 active:scale-95 transition-all flex items-center gap-3">
+                               <Play fill="black" size={20} /> Stream Discovery
+                            </button>
+                            <button onClick={() => downloadTrack(dailyPick)} className="p-5 bg-white/5 border border-white/10 text-white rounded-full hover:bg-white/10 transition-all">
+                               <Download size={24} />
+                            </button>
+                          </div>
+                       </div>
                     </div>
                   </section>
                 )}
 
-                {/* Trending Section */}
-                <section className="space-y-8">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                       <div className="w-12 h-12 rounded-2xl mixed-gradient flex items-center justify-center shadow-lg"><TrendingUp size={24} color="white"/></div>
-                       <div>
-                          <h3 className="text-3xl font-black italic tracking-tighter uppercase leading-none">Trending Now</h3>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Global Hits</p>
-                       </div>
-                    </div>
-                    <button onClick={() => setActiveTab("trending")} className="text-[10px] text-white/40 hover:text-magenta uppercase font-black tracking-widest transition-colors">View More</button>
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-8">
-                    {trendingTracks.filter(t => t.type === 'track').slice(0, 6).map((t) => (
-                      <div 
-                        key={t.id} 
-                        onClick={() => { setCurrentTrack({ ...t, cover: t.thumbnail, artist: t.author }); setIsPlaying(true); }}
-                        className="group cursor-pointer space-y-4"
-                      >
-                        <div className="relative aspect-square rounded-3xl overflow-hidden shadow-xl border border-white/5">
-                          <img src={t.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-all duration-700" />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center backdrop-blur-sm">
-                            <Play fill="white" size={32} stroke="none" />
-                          </div>
-                        </div>
-                        <div className="px-1">
-                           <p className="text-xs font-black text-white truncate uppercase italic tracking-tight">{t.title}</p>
-                           <p className="text-[9px] text-white/30 uppercase tracking-widest mt-1 font-black italic">{t.author}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                {/* New Releases (Playlists/Albums) */}
-                <section className="space-y-8">
-                   <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-white/40"><Layers size={24} /></div>
-                      <div>
-                         <h3 className="text-3xl font-black italic tracking-tighter uppercase leading-none text-magenta">Trending Albums</h3>
-                         <p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30 italic">Best Collections</p>
-                      </div>
-                   </div>
-                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                      {trendingTracks.filter(t => t.type === 'album').slice(0, 3).map(album => (
-                        <div 
-                          key={album.id}
-                          onClick={() => handleAlbumClick(album)}
-                          className="relative h-64 rounded-[2.5rem] overflow-hidden group cursor-pointer border border-white/10 shadow-2xl"
-                        >
-                           <img src={album.thumbnail} className="absolute inset-0 w-full h-full object-cover group-hover:scale-110 transition-transform duration-[10s]" />
-                           <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent"></div>
-                           <div className="absolute inset-0 flex flex-col justify-end p-8 space-y-2">
-                              <span className="w-fit px-3 py-1 bg-magenta/20 text-magenta text-[8px] font-black uppercase tracking-widest rounded-full border border-magenta/30">{album.category}</span>
-                              <h4 className="text-2xl font-black uppercase italic tracking-tighter text-white">{album.title}</h4>
-                              <p className="text-xs text-white/40 font-black uppercase tracking-widest">{album.author}</p>
+                {/* Artists & Their Logic - Organized view */}
+                {Array.from(new Set(trendingTracks.filter(t => t.type === 'track').map(t => t.author))).slice(0, 5).map(artistName => {
+                  const artistTracks = trendingTracks.filter(t => t.author === artistName && t.type === 'track');
+                  return (
+                    <section key={artistName} className="space-y-6">
+                      <div className="flex items-center justify-between px-2">
+                        <div className="flex items-center gap-4">
+                           <div className="w-10 h-10 rounded-full mixed-gradient flex items-center justify-center font-black text-xs italic">
+                              {(artistName as string).charAt(0)}
                            </div>
+                           <h2 className="text-2xl font-black italic uppercase tracking-tighter text-white">{artistName as string}</h2>
                         </div>
-                      ))}
-                   </div>
-                </section>
+                        <button className="text-[10px] font-black uppercase tracking-widest text-white/20 hover:text-emerald-400 transition-colors">Discography</button>
+                      </div>
+                      <div className="flex gap-6 overflow-x-auto no-scrollbar pb-6 -mx-2 px-2">
+                         {artistTracks.map((t, tidx) => (
+                           <div 
+                             key={`${t.id}-${tidx}`} 
+                             onClick={() => playTrack({ ...t, cover: t.thumbnail, artist: t.author }, artistTracks.map(track => ({ ...track, cover: track.thumbnail, artist: track.author })))} 
+                             className="min-w-[220px] max-w-[220px] group cursor-pointer space-y-4"
+                           >
+                              <div className="relative aspect-square rounded-[2.5rem] overflow-hidden shadow-2xl border border-white/5 bg-white/5">
+                                 <img src={t.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" alt="card" />
+                                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center backdrop-blur-md">
+                                    <div className="w-12 h-12 rounded-full border-2 border-white flex items-center justify-center text-white scale-75 group-hover:scale-100 transition-all">
+                                       <Play fill="white" size={20} stroke="none" className="ml-1" />
+                                    </div>
+                                 </div>
+                              </div>
+                              <div className="px-2">
+                                <p className="font-black italic uppercase tracking-tight text-white whitespace-nowrap overflow-hidden text-ellipsis">{t.title}</p>
+                                <p className="text-[10px] font-black uppercase text-white/30 tracking-widest mt-1 italic">{t.category}</p>
+                              </div>
+                           </div>
+                         ))}
+                      </div>
+                    </section>
+                  );
+                })}
 
-                {/* Genres / For You */}
-                <section className="space-y-10">
-                   <div className="text-center">
-                      <h3 className="text-4xl font-black italic uppercase tracking-tighter text-white/10">Music Genres</h3>
-                   </div>
-                   <div className="flex flex-wrap justify-center gap-4">
-                      {["Afrobeats", "UK Drill", "Asian Hits", "K-Pop", "Amapiano", "Hip Hop", "Latin", "Lo-Fi", "Synthwave", "Phonk"].map(genre => (
-                        <button 
-                          key={genre}
-                          onClick={() => { setSearchQuery(genre); handleSearch(); }}
-                          className="px-10 py-5 rounded-3xl border border-white/10 bg-white/5 hover:bg-magenta hover:text-white hover:border-magenta font-black uppercase tracking-widest text-[10px] italic transition-all shadow-lg active:scale-95"
-                        >
-                           {genre}
-                        </button>
+                {/* Trending Albums (Sectioned) */}
+                <section className="space-y-6">
+                   <h2 className="text-4xl font-black italic uppercase tracking-[ -0.05em] text-white px-2">Essential Collections</h2>
+                   <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
+                      {trendingTracks.filter(t => t.type === 'album').slice(0, 10).map(album => (
+                        <div key={album.id} onClick={() => handleAlbumClick(album)} className="p-4 bg-white/[0.03] border border-white/10 rounded-[2rem] hover:bg-white/[0.08] transition-all group cursor-pointer hover:-translate-y-2">
+                           <div className="aspect-square rounded-2xl overflow-hidden mb-4 shadow-xl">
+                              <img src={album.thumbnail} className="w-full h-full object-cover" alt="alb" />
+                           </div>
+                           <h3 className="font-bold text-white text-sm truncate px-1">{album.title}</h3>
+                           <p className="text-[10px] text-white/30 font-black uppercase tracking-widest px-1 mt-1">{album.author}</p>
+                        </div>
                       ))}
                    </div>
                 </section>
@@ -849,10 +1128,10 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-[10px] uppercase font-black tracking-[0.4em] text-magenta mb-2">Discovery</p>
-                      <h3 className="text-5xl font-black italic uppercase tracking-tighter leading-none">Featured Artists</h3>
+                      <h3 className="text-5xl font-black italic uppercase tracking-tighter leading-none">Global Artists</h3>
                     </div>
                   </div>
-                  <div className="flex gap-8 overflow-x-auto no-scrollbar pb-6 -mx-4 px-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-8">
                     {[
                       { id: 27, name: 'Daft Punk', img: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c9484f380a9370f37d50/500x500.jpg' },
                       { id: 13, name: 'Eminem', img: 'https://e-cdns-images.dzcdn.net/images/artist/19543ad22da6e03946014e5cae285a8a/500x500.jpg' },
@@ -866,15 +1145,12 @@ export default function App() {
                       <div 
                         key={art.id} 
                         onClick={() => handleArtistClick(art)}
-                        className="w-44 shrink-0 group cursor-pointer space-y-4"
+                        className="group cursor-pointer space-y-3"
                       >
-                        <div className="relative aspect-square rounded-full overflow-hidden border-2 border-white/5 group-hover:border-magenta transition-all shadow-2xl">
-                          <img src={art.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={art.name} />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
-                            <ArrowRight className="text-white" />
-                          </div>
+                        <div className="relative aspect-square rounded-full overflow-hidden border border-white/5 group-hover:border-magenta group-hover:shadow-[0_0_30px_rgba(255,0,255,0.2)] transition-all">
+                          <img src={art.img} className="w-full h-full object-cover grayscale group-hover:grayscale-0 group-hover:scale-110 transition-all duration-700" alt={art.name} />
                         </div>
-                        <p className="text-center font-black italic uppercase tracking-tighter text-sm group-hover:text-magenta transition-colors">{art.name}</p>
+                        <p className="text-center font-black italic uppercase tracking-tighter text-[10px] group-hover:text-magenta transition-colors">{art.name}</p>
                       </div>
                     ))}
                   </div>
@@ -883,38 +1159,38 @@ export default function App() {
                 <div className="space-y-12">
                   <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
                     <div>
-                      <p className="text-[10px] uppercase font-black tracking-[0.4em] text-magenta mb-2">Recommended for you</p>
-                      <h2 className="text-5xl font-black uppercase italic tracking-tighter leading-none">Trending Albums</h2>
+                      <p className="text-[10px] uppercase font-black tracking-[0.4em] text-magenta mb-2">Aural Trends</p>
+                      <h2 className="text-6xl font-black uppercase italic tracking-tighter leading-none">Chart Toppers</h2>
                     </div>
-                  <div className="flex bg-white/5 p-1 rounded-2xl border border-white/10 overflow-x-auto no-scrollbar">
-                    {["Trending", "Afrobeats", "UK Drill", "Asian", "Hip Hop", "Drill", "Amapiano", "Electronic", "Albums"].map((cat) => (
-                      <button 
-                        key={cat}
-                        onClick={() => setTrendingCategory(cat)}
-                        className={`px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${trendingCategory === cat ? "bg-magenta text-white" : "text-white/40 hover:text-white"}`}
-                      >
-                        {cat}
-                      </button>
-                    ))}
+                    <div className="flex bg-white/5 p-1 rounded-2xl border border-white/10 overflow-x-auto no-scrollbar">
+                      {["Trending", "Afrobeats", "Asian", "Electronic", "Albums"].map((cat) => (
+                        <button 
+                          key={cat}
+                          onClick={() => setTrendingCategory(cat)}
+                          className={`px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${trendingCategory === cat ? "bg-magenta text-white" : "text-white/40 hover:text-white"}`}
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-8">
-                  {trendingTracks.filter(t => trendingCategory === "Trending" ? true : t.category === trendingCategory).map((t) => (
-                    <div 
-                      key={t.id} 
-                      onClick={() => { 
-                        if (t.type === 'album') { handleAlbumClick(t); }
-                        else { setCurrentTrack({ ...t, cover: t.thumbnail, artist: t.author }); setIsPlaying(true); }
-                      }}
-                      className="group cursor-pointer space-y-4"
-                    >
-                        <div className="relative aspect-square rounded-[2rem] overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/10">
-                          {t.thumbnail ? (
-                            <img src={t.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt="t" />
-                          ) : (
-                            <div className="w-full h-full bg-white/5 flex items-center justify-center"><MusicIcon className="text-white/20" /></div>
-                          )}
+                  
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-8">
+                    {trendingTracks.filter(t => (trendingCategory === "Trending" ? true : trendingCategory === "Albums" ? t.type === "album" : t.category === trendingCategory)).map((t, tidx) => (
+                      <div 
+                        key={`${t.id}-${tidx}`} 
+                        onClick={() => { 
+                          if (t.type === 'album') { handleAlbumClick(t); }
+                          else { playTrack({ ...t, cover: t.thumbnail, artist: t.author }, trendingTracks.filter(tr => tr.type === 'track').map(tr => ({ ...tr, cover: tr.thumbnail, artist: tr.author }))); }
+                        }}
+                        className="group cursor-pointer space-y-4"
+                      >
+                          <div className="relative aspect-square rounded-[2rem] overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/10">
+                            {t.thumbnail ? (
+                              <img src={t.thumbnail} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt="t" />
+                            ) : (
+                              <div className="w-full h-full bg-white/5 flex items-center justify-center"><MusicIcon className="text-white/20" /></div>
+                            )}
                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center backdrop-blur-[2px]">
                           <div className={`w-14 h-14 rounded-full flex items-center justify-center text-white scale-75 group-hover:scale-100 transition-all ${t.type === 'album' ? 'bg-magenta' : 'bg-white/20'}`}>
                             {t.type === 'album' ? <Music2 /> : <Play fill="white" size={24} stroke="none" className="ml-1" />}
@@ -1228,52 +1504,61 @@ export default function App() {
       </div>
 
       {/* Player Bar */}
-      <footer className="h-24 backdrop-blur-3xl bg-black/80 border-t border-white/10 flex items-center justify-between px-10 relative z-[90]">
-        <div className="flex items-center gap-5 w-1/4">
+      <footer className="fixed bottom-20 lg:bottom-0 left-0 right-0 h-24 backdrop-blur-3xl bg-black/80 border-t border-white/10 flex items-center justify-between px-4 lg:px-10 z-[110]">
+        <div className="flex items-center gap-3 lg:gap-5 w-auto lg:w-1/4">
           {currentTrack ? (
             <>
-              <div className="w-14 h-14 bg-white/5 rounded-xl border border-white/10 overflow-hidden shadow-2xl">
+              <div className="w-10 h-10 lg:w-14 lg:h-14 bg-white/5 rounded-xl border border-white/10 overflow-hidden shadow-2xl">
                 <img src={currentTrack.cover} className="w-full h-full object-cover" alt="current" />
               </div>
-              <div className="max-w-[180px]">
-                <p className="text-sm font-bold text-white truncate leading-tight">{currentTrack.title}</p>
-                <p className="text-[10px] text-white/40 truncate mt-1 uppercase tracking-widest font-black italic">{currentTrack.artist}</p>
+              <div className="max-w-[120px] lg:max-w-[180px]">
+                <p className="text-xs lg:text-sm font-bold text-white truncate leading-tight">{currentTrack.title}</p>
+                <p className="text-[10px] text-white/40 truncate mt-0.5 lg:mt-1 uppercase tracking-widest font-black italic">{currentTrack.artist}</p>
               </div>
-              <button className="text-pink hover:scale-110 transition-transform">
-                <Heart size={18} fill="currentColor" />
-              </button>
             </>
           ) : (
-            <div className="text-white/20 text-[10px] font-black uppercase tracking-widest italic">Choose a track to play</div>
+            <div className="text-white/20 text-[10px] font-black uppercase tracking-widest italic hidden lg:block">Choose a track to play</div>
           )}
         </div>
 
-        <div className="flex flex-col items-center gap-3 w-2/4 max-w-2xl px-16">
-          <div className="flex items-center gap-8">
-            <Shuffle size={18} className="text-white/40 cursor-pointer hover:text-magenta transition-colors" />
-            <SkipBack size={22} className="text-white cursor-pointer hover:scale-110 transition-all" />
+        <div className="flex flex-col items-center gap-2 lg:gap-3 flex-1 lg:w-2/4 lg:max-w-2xl px-2 lg:px-16">
+          <div className="flex items-center gap-4 lg:gap-8">
+            <Shuffle size={16} className="text-white/40 cursor-pointer hover:text-[var(--brand-color)] transition-colors hidden lg:block" />
+            <SkipBack size={20} className="text-white cursor-pointer hover:scale-110 transition-all hidden lg:block" />
             <button 
               onClick={() => setIsPlaying(!isPlaying)}
-              className="w-12 h-12 mixed-gradient rounded-full flex items-center justify-center text-white shadow-[0_0_30px_rgba(255,0,255,0.3)] hover:scale-110 active:scale-95 transition-all"
+              className="w-10 h-10 lg:w-12 lg:h-12 bg-[var(--brand-color)] rounded-full flex items-center justify-center text-black shadow-[0_0_20px_var(--brand-shadow)] hover:scale-110 active:scale-95 transition-all"
             >
-              {isPlaying ? <Pause size={24} fill="white" /> : <Play size={24} fill="white" className="ml-1" />}
+              {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
             </button>
-            <SkipForward size={22} className="text-white cursor-pointer hover:scale-110 transition-all" />
-            <Repeat size={18} className="text-white/40 cursor-pointer hover:text-neon-blue transition-colors" />
-          </div>
-          <div className="flex items-center gap-4 w-full px-4">
-            <span className="text-[10px] text-white/30 font-mono font-bold">{formatTime(currentTime)}</span>
-            <div 
-              onClick={seek}
-              className="flex-1 h-1.5 bg-white/10 rounded-full cursor-pointer relative overflow-hidden group"
-            >
-              <div 
-                className="absolute top-0 left-0 h-full mixed-gradient rounded-full" 
-                style={{ width: `${(currentTime / duration) * 100}%` }}
-              />
-              <div className="absolute top-0 left-0 w-full h-full group-hover:bg-white/5 transition-colors" />
+            <SkipForward size={20} className="text-white cursor-pointer hover:scale-110 transition-all" />
+            
+            <div className="relative group hidden lg:block">
+              <button className="text-[10px] font-black text-white/40 hover:text-white uppercase tracking-widest">{playbackRate}x</button>
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#121214] border border-white/10 rounded-xl overflow-hidden opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+                 {[0.5, 1, 1.25, 1.5, 2].map(r => (
+                   <button key={r} onClick={() => setPlaybackRate(r)} className="block w-full px-4 py-2 text-[10px] font-black text-white/40 hover:bg-white/5 hover:text-white">{r}x</button>
+                 ))}
+              </div>
             </div>
-            <span className="text-[10px] text-white/30 font-mono font-bold">{formatTime(duration)}</span>
+          </div>
+          <div className="flex items-center gap-3 lg:gap-4 w-full px-2 lg:px-4">
+            <span className="text-[9px] lg:text-[10px] text-white/30 font-mono font-bold">{formatTime(currentTime)}</span>
+            <div className="flex-1 h-2 relative flex items-center">
+              <div className="absolute inset-0 z-0 opacity-20">
+                 <AudioVisualizer audioRef={audioRef} />
+              </div>
+              <div 
+                onClick={seek}
+                className="w-full h-1 lg:h-1.5 bg-white/10 rounded-full cursor-pointer relative overflow-hidden group z-10"
+              >
+                <div 
+                  className="absolute top-0 left-0 h-full bg-[var(--brand-color)] rounded-full shadow-[0_0_10px_var(--brand-shadow)]" 
+                  style={{ width: `${(currentTime / duration) * 100}%` }}
+                />
+              </div>
+            </div>
+            <span className="text-[9px] lg:text-[10px] text-white/30 font-mono font-bold">{formatTime(duration)}</span>
           </div>
         </div>
 
@@ -1283,13 +1568,24 @@ export default function App() {
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onEnded={playNext}
+          preload="auto"
           onError={() => {
             setIsPlaying(false);
-            setErrorMessage("Stream failed. Possible YouTube blocking or invalid link.");
+            setErrorMessage("Sync failure. Node sequence interrupted.");
           }}
         />
 
         <div className="flex items-center justify-end gap-6 w-1/4">
+          {currentTrack && currentTrack.isOffline && (
+            <motion.div 
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="flex items-center gap-2 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full"
+            >
+               <WifiOff size={12} className="text-emerald-400 animate-pulse" />
+               <span className="text-[9px] font-black uppercase tracking-widest text-emerald-400 italic">Offline Sequence Active</span>
+            </motion.div>
+          )}
           {currentTrack && (
             <div className="flex items-center gap-3">
               <button 
@@ -1311,6 +1607,12 @@ export default function App() {
                 className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${sleepTimer !== null ? "bg-red-500/20 text-red-500" : "bg-white/5 text-white/40 hover:text-white"}`}
               >
                 <Clock size={14} /> {sleepTimer ? `${sleepTimer}m` : "Sleep"}
+              </button>
+              <button 
+                onClick={() => setShowQueue(!showQueue)} 
+                className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${showQueue ? "bg-magenta text-white shadow-[0_0_30px_var(--brand-shadow)]" : "bg-white/5 text-white/40 hover:text-white"}`}
+              >
+                <ListMusic size={14} /> Queue ({playbackQueue.length})
               </button>
               <button 
                 onClick={() => setShowLyrics(!showLyrics)} 
@@ -1336,6 +1638,191 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Download Queue Floating Panel */}
+      {showQueue && (
+         <div className="fixed bottom-28 left-6 z-[120] w-[350px] pointer-events-none">
+            <AnimatePresence>
+              <motion.div 
+                initial={{ opacity: 0, y: 50, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 50, scale: 0.9 }}
+                className="bg-[#121214]/90 backdrop-blur-3xl border border-white/10 rounded-[2.5rem] shadow-[0_30px_60px_rgba(0,0,0,0.8)] overflow-hidden pointer-events-auto flex flex-col max-h-[600px]"
+              >
+                 <div className="p-6 border-b border-white/10 bg-white/5 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                       <div className="w-8 h-8 rounded-xl mixed-gradient flex items-center justify-center">
+                          <ListMusic size={14} className="text-white" />
+                       </div>
+                       <div>
+                          <span className="text-[10px] font-black uppercase tracking-[0.2em] block">Upcoming Sequence</span>
+                          <span className="text-[8px] text-white/40 uppercase font-black">{playbackQueue.length} Entities</span>
+                       </div>
+                    </div>
+                    <button onClick={() => setShowQueue(false)} className="text-white/20 hover:text-white transition-colors"><X size={20} /></button>
+                 </div>
+                 
+                 <div className="flex-1 overflow-y-auto no-scrollbar p-3 space-y-2">
+                    {playbackQueue.length > 0 ? playbackQueue.map((item, idx) => (
+                       <div 
+                         key={`${item.id}-${idx}`} 
+                         onClick={() => { setQueueIndex(idx); setCurrentTrack(item); setIsPlaying(true); }}
+                         className={`p-3 rounded-2xl border transition-all cursor-pointer group flex items-center gap-4 ${idx === queueIndex ? "bg-[var(--brand-color)]/20 border-[var(--brand-color)]/30" : "bg-white/5 border-white/5 hover:bg-white/10"}`}
+                       >
+                          <div className="relative w-10 h-10 rounded-lg overflow-hidden shrink-0">
+                             <img src={item.cover} className="w-full h-full object-cover" alt="q" />
+                             {idx === queueIndex && (
+                               <div className="absolute inset-0 bg-black/40 flex items-center justify-center transition-all">
+                                  <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
+                               </div>
+                             )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                             <p className={`text-[10px] font-bold truncate ${idx === queueIndex ? "text-[var(--brand-color)]" : "text-white"}`}>{item.title}</p>
+                             <p className="text-[8px] font-black uppercase text-white/30 tracking-widest">{item.artist}</p>
+                          </div>
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                             <button onClick={(e) => { e.stopPropagation(); removeFromQueue(idx); }} className="p-2 text-white/20 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"><Trash2 size={12} /></button>
+                          </div>
+                       </div>
+                    )) : (
+                      <div className="h-40 flex flex-col items-center justify-center text-white/10 gap-3 grayscale">
+                         <Library size={32} />
+                         <p className="text-[10px] font-black uppercase tracking-widest">Nexus Empty</p>
+                      </div>
+                    )}
+                 </div>
+
+                 {playbackQueue.length > 0 && (
+                    <div className="p-4 bg-white/5 border-t border-white/10">
+                       <button onClick={() => setPlaybackQueue([])} className="w-full py-3 text-[8px] font-black uppercase tracking-[0.3em] text-white/20 hover:text-white transition-colors">Terminate Sequence</button>
+                    </div>
+                 )}
+              </motion.div>
+            </AnimatePresence>
+         </div>
+      )}
+
+      {/* Download Queue Floating Panel */}
+      {downloadQueue.length > 0 && (
+        <div className="fixed bottom-28 right-6 z-[120] w-[320px] pointer-events-none">
+           <AnimatePresence>
+              <motion.div 
+                initial={{ opacity: 0, y: 50, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 50, scale: 0.9 }}
+                className="bg-[#121214]/90 backdrop-blur-3xl border border-white/10 rounded-[2.5rem] shadow-[0_30px_60px_rgba(0,0,0,0.8)] overflow-hidden pointer-events-auto"
+              >
+                 <div className="p-5 border-b border-white/10 bg-white/5 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                       <Download size={14} className="text-[var(--brand-color)]" />
+                       <span className="text-[10px] font-black uppercase tracking-[0.2em]">Flux Queue</span>
+                    </div>
+                    <button onClick={() => setDownloadQueue([])} className="text-white/20 hover:text-white transition-colors text-[10px] uppercase font-black">Purge</button>
+                 </div>
+                 <div className="max-h-[350px] overflow-y-auto no-scrollbar p-3 space-y-2">
+                    {downloadQueue.map((item, qidx) => (
+                       <div key={`${item.id}-${qidx}`} className="p-3 bg-white/5 rounded-2xl border border-white/5 space-y-3">
+                          <div className="flex items-center gap-3">
+                             <img src={item.thumbnail} className="w-10 h-10 rounded-lg object-cover" alt="t" />
+                             <div className="flex-1 min-w-0">
+                                <p className="text-[10px] font-bold text-white truncate">{item.title}</p>
+                                <p className="text-[8px] font-black uppercase text-white/30 tracking-widest">{item.status}</p>
+                             </div>
+                             {item.status === 'completed' ? (
+                                <CheckCircle2 size={14} className="text-green-500" />
+                             ) : (
+                                <span className="text-[8px] font-mono text-white/40">{item.estimatedTime}</span>
+                             ) }
+                          </div>
+                          {item.status === 'downloading' && (
+                             <div className="space-y-1">
+                                <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                                   <div className="h-full bg-[var(--brand-color)] transition-all duration-1000 shadow-[0_0_10px_var(--brand-shadow)]" style={{ width: `${item.progress}%` }} />
+                                </div>
+                                <div className="flex justify-between items-center px-1">
+                                   <span className="text-[7px] font-black text-white/20 uppercase tracking-tighter">Syncing...</span>
+                                   <span className="text-[7px] font-mono text-white/40">{Math.round(item.progress)}%</span>
+                                </div>
+                             </div>
+                          )}
+                       </div>
+                    ))}
+                 </div>
+              </motion.div>
+           </AnimatePresence>
+        </div>
+      )}
+
+      {/* Mobile Bottom Navigation */}
+      <nav className="fixed bottom-0 left-0 right-0 h-20 bg-black/80 backdrop-blur-3xl border-t border-white/10 flex lg:hidden items-center justify-around px-2 z-[100]">
+        <MobileNavItem icon={<Home size={24} />} label="Home" active={activeTab === "home"} onClick={() => setActiveTab("home")} />
+        <MobileNavItem icon={<Search size={24} />} label="Search" active={activeTab === "downloader"} onClick={() => setActiveTab("downloader")} />
+        <MobileNavItem icon={<TrendingUp size={24} />} label="Trending" active={activeTab === "trending"} onClick={() => setActiveTab("trending")} />
+        <MobileNavItem icon={<Library size={24} />} label="Library" active={activeTab.startsWith("playlist-") || activeTab === "offline"} onClick={() => setActiveTab("offline")} />
+      </nav>
+
+      <AnimatePresence>
+        {showRequestModal && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center p-6 backdrop-blur-3xl bg-black/80">
+            <motion.div 
+               initial={{ opacity: 0, scale: 0.9, y: 20 }}
+               animate={{ opacity: 1, scale: 1, y: 0 }}
+               exit={{ opacity: 0, scale: 0.9, y: 20 }}
+               className="bg-[#121214] border border-white/10 p-8 rounded-[3rem] max-w-md w-full space-y-8 shadow-[0_40px_100px_rgba(0,0,0,0.9)]"
+            >
+               <div className="text-center space-y-4">
+                  <div className="w-20 h-20 bg-[var(--brand-color)]/20 rounded-[2rem] flex items-center justify-center mx-auto text-[var(--brand-color)]">
+                    <Megaphone size={40} className="animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-3xl font-black italic tracking-tighter uppercase text-white">Broadcast Request</h3>
+                    <p className="text-white/40 text-xs font-bold uppercase tracking-widest mt-2">Relay your sonic desires to the community</p>
+                  </div>
+               </div>
+               
+               <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase text-white/30 ml-4 tracking-[0.2em]">Sonification Target</label>
+                    <input 
+                      type="text" 
+                      placeholder="Input Track Name..." 
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 outline-none focus:border-[var(--brand-color)] transition-all font-bold text-white"
+                      value={requestSongName}
+                      onChange={(e) => setRequestSongName(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase text-white/30 ml-4 tracking-[0.2em]">Entity Source (Artist)</label>
+                    <input 
+                      type="text" 
+                      placeholder="Optional Artist Meta..." 
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 outline-none focus:border-[var(--brand-color)] transition-all font-bold text-white"
+                      value={requestArtist}
+                      onChange={(e) => setRequestArtist(e.target.value)}
+                    />
+                  </div>
+               </div>
+
+               <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={submitRequest}
+                    disabled={!requestSongName}
+                    className="w-full py-5 mixed-gradient rounded-3xl font-black text-white uppercase tracking-widest shadow-2xl hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:grayscale transition-all"
+                  >
+                    Initiate Transmission
+                  </button>
+                  <button 
+                    onClick={() => setShowRequestModal(false)}
+                    className="w-full py-3 text-white/40 text-[10px] font-black uppercase tracking-[0.3em] hover:text-white transition-colors"
+                  >
+                    Abort Sequence
+                  </button>
+               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {showLyrics && currentTrack && (
@@ -1487,29 +1974,66 @@ const AdminPanel = () => {
   const [activeSubTab, setActiveSubTab] = useState('dash');
   const [stats, setStats] = useState<any>(null);
   const [admins, setAdmins] = useState<any[]>([]);
+  const [requests, setRequests] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
   const [newAdminEmail, setNewAdminEmail] = useState("");
-  const [users, setUsers] = useState<any[]>([
-    { id: 1, name: "John Doe", email: "john@nova.com", plan: "Premium", joinDate: "2026-05-01" },
-    { id: 2, name: "Jane Smith", email: "jane@nova.com", plan: "Free", joinDate: "2026-05-10" },
-    { id: 3, name: "Alex Ross", email: "alex@nova.com", plan: "Premium", joinDate: "2026-05-12" },
-  ]);
 
   useEffect(() => {
     fetch('/api/admin/stats')
       .then(res => res.ok ? res.json() : null)
       .then(data => data && setStats(data))
       .catch(err => console.error("Admin stats fetch failed", err));
-    const q = query(collection(db, "admins"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+
+    const adminsQ = query(collection(db, "admins"));
+    const unsubAdmins = onSnapshot(adminsQ, (snapshot) => {
       setAdmins(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
-    return () => unsubscribe();
+
+    const usersQ = query(collection(db, "users"), orderBy("createdAt", "desc"), limit(50));
+    const unsubUsers = onSnapshot(usersQ, (snapshot) => {
+      setUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    const requestsQ = query(collection(db, "song-requests"), orderBy("createdAt", "desc"), limit(30));
+    const unsubRequests = onSnapshot(requestsQ, (snapshot) => {
+      setRequests(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    return () => {
+      unsubAdmins();
+      unsubUsers();
+      unsubRequests();
+    };
   }, []);
 
   const addAdmin = async () => {
-     if (!newAdminEmail) return;
-     await addDoc(collection(db, "admins"), { email: newAdminEmail });
-     setNewAdminEmail("");
+    if (!newAdminEmail) return;
+    try {
+      const adminRef = doc(db, "admins", newAdminEmail);
+      await setDoc(adminRef, { email: newAdminEmail, addedAt: serverTimestamp() });
+      setNewAdminEmail("");
+    } catch (err) {
+      console.error("Admin add failed", err);
+    }
+  };
+
+  const toggleAdmin = async (u: any) => {
+    const newRole = u.role === 'admin' ? 'user' : 'admin';
+    try {
+      await updateDoc(doc(db, "users", u.id), { role: newRole });
+      if (newRole === 'admin') {
+        const adminRef = doc(db, "admins", u.email);
+        await setDoc(adminRef, { email: u.email, addedAt: serverTimestamp() });
+      } else {
+        await deleteDoc(doc(db, "admins", u.email));
+      }
+    } catch (err) {
+      console.error("Promotion failed", err);
+    }
+  };
+
+  const updateRequestStatus = async (id: string, status: string) => {
+    await updateDoc(doc(db, "song-requests", id), { status });
   };
 
   return (
@@ -1522,8 +2046,8 @@ const AdminPanel = () => {
         <div className="flex bg-white/5 p-1.5 rounded-2xl border border-white/10 backdrop-blur-3xl overflow-x-auto no-scrollbar">
            <AdminTabBtn active={activeSubTab === 'dash'} icon={<LayoutDashboard size={14} />} label="Dash" onClick={() => setActiveSubTab('dash')} />
            <AdminTabBtn active={activeSubTab === 'users'} icon={<Users size={14} />} label="Users" onClick={() => setActiveSubTab('users')} />
+           <AdminTabBtn active={activeSubTab === 'requests'} icon={<MessageSquare size={14} />} label="Requests" onClick={() => setActiveSubTab('requests')} />
            <AdminTabBtn active={activeSubTab === 'content'} icon={<MusicIcon size={14} />} label="Content" onClick={() => setActiveSubTab('content')} />
-           <AdminTabBtn active={activeSubTab === 'config'} icon={<Settings size={14} />} label="System" onClick={() => setActiveSubTab('config')} />
         </div>
       </div>
 
@@ -1531,18 +2055,18 @@ const AdminPanel = () => {
         {activeSubTab === 'dash' && (
            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-8">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                 <StatCard label="Total Pulse" value={stats?.totalUsers || '0'} trend="+12.5%" icon={<Users className="text-magenta" size={20}/>}/>
-                 <StatCard label="Live Streams" value={stats?.totalStreams || '0'} trend="+40%" icon={<Activity className="text-neon-blue" size={20}/>}/>
-                 <StatCard label="Net Revenue" value={`$${stats?.revenue || '0'}`} trend="+18.2%" icon={<DollarSign className="text-green-400" size={20}/>}/>
-                 <StatCard label="Active Now" value={stats?.dailyActive || '0'} trend="+2.3%" icon={<Cpu className="text-magenta" size={20}/>}/>
+                 <StatCard label="Total Pulse" value={users.length || '0'} trend="+12.5%" icon={<Users className="text-magenta" size={20}/>}/>
+                 <StatCard label="Song Requests" value={requests.length || '0'} trend="Live" icon={<Activity className="text-neon-blue" size={20}/>}/>
+                 <StatCard label="System Admins" value={admins.length || '0'} trend="Secure" icon={<ShieldCheck className="text-green-400" size={20}/>}/>
+                 <StatCard label="Daily Active" value={stats?.dailyActive || '0'} trend="+2.3%" icon={<Cpu className="text-magenta" size={20}/>}/>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                 <div className="lg:col-span-2 bg-white/5 border border-white/10 p-8 rounded-[3rem] h-[400px] flex flex-col items-center justify-center text-white/10 gap-6">
+                 <div className="lg:col-span-2 bg-white/5 border border-white/10 p-8 rounded-[3rem] h-[450px] overflow-hidden flex flex-col items-center justify-center text-white/10 gap-6">
                     <BarChart3 size={64} />
-                    <p className="font-black uppercase tracking-[0.5em] text-[10px] text-white/30 text-center">Real-time Traffic Telemetry Processing...</p>
+                    <p className="font-black uppercase tracking-[0.5em] text-[10px] text-white/30 text-center">Neural Network Latency Telemetry...</p>
                     <div className="flex gap-2 items-end">
-                       {[40, 70, 45, 90, 65, 80, 55, 30, 95].map((h, i) => (
+                       {[40, 70, 45, 90, 65, 80, 55, 30, 95, 60, 40, 85].map((h, i) => (
                          <motion.div 
                            key={i} 
                            initial={{ height: 0 }} 
@@ -1554,12 +2078,12 @@ const AdminPanel = () => {
                     </div>
                  </div>
                  <div className="bg-white/5 border border-white/10 p-8 rounded-[3rem] space-y-6">
-                    <h3 className="font-black uppercase italic tracking-widest text-white/20 text-[10px]">Resource Saturation</h3>
+                    <h3 className="font-black uppercase italic tracking-widest text-white/20 text-[10px]">Infrastructure Load</h3>
                     <div className="space-y-8">
                        <UsageBar label="Global Storage" value={76} hint={stats?.storageUsed || '0GB'} color="bg-magenta shadow-[0_0_20px_rgba(255,0,255,0.4)]" />
                        <UsageBar label="CDN Transmit" value={34} hint={stats?.bandwidth || '0TB'} color="bg-neon-blue shadow-[0_0_20px_rgba(0,255,255,0.4)]" />
-                       <UsageBar label="Core Clusters" value={12} hint="Optimal" color="bg-green-400" />
-                       <UsageBar label="API Latecy" value={5} hint="4ms" color="bg-white" />
+                       <UsageBar label="Core Servers" value={12} hint="Optimal" color="bg-green-400" />
+                       <UsageBar label="System Health" value={98} hint="Nominal" color="bg-white" />
                     </div>
                  </div>
               </div>
@@ -1573,10 +2097,10 @@ const AdminPanel = () => {
                  <thead>
                     <tr className="border-b border-white/10 bg-white/5 text-[10px] uppercase font-black tracking-widest text-white/40">
                        <th className="px-8 py-6 italic">Identity</th>
-                       <th className="px-8 py-6 italic">Protocol</th>
+                       <th className="px-8 py-6 italic">Privilege</th>
                        <th className="px-8 py-6 italic">Nexus Join</th>
-                       <th className="px-8 py-6 italic">Status</th>
-                       <th className="px-8 py-6 italic">Actions</th>
+                       <th className="px-8 py-6 italic">Nexus Access</th>
+                       <th className="px-8 py-6 italic">Permission Matrix</th>
                     </tr>
                  </thead>
                  <tbody className="divide-y divide-white/5">
@@ -1584,32 +2108,81 @@ const AdminPanel = () => {
                        <tr key={u.id} className="hover:bg-white/5 transition-colors">
                           <td className="px-8 py-6">
                              <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center font-black italic text-xs">{u.name[0]}</div>
+                                {u.photoURL ? (
+                                   <img src={u.photoURL} className="w-10 h-10 rounded-full border border-white/10" alt="u" />
+                                ) : (
+                                   <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center font-black italic text-xs">{u.displayName?.[0] || 'U'}</div>
+                                )}
                                 <div>
-                                   <p className="text-sm font-bold text-white">{u.name}</p>
+                                   <p className="text-sm font-bold text-white">{u.displayName || 'Anonymous'}</p>
                                    <p className="text-[10px] text-white/30 font-black">{u.email}</p>
                                 </div>
                              </div>
                           </td>
                           <td className="px-8 py-6">
-                             <span className={`px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest ${u.plan === 'Premium' ? 'bg-magenta/20 text-magenta border border-magenta/20' : 'bg-white/10 text-white/40'}`}>
-                                {u.plan}
+                             <span className={`px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest ${u.role === 'admin' ? 'bg-magenta/20 text-magenta border border-magenta/20' : 'bg-white/10 text-white/40'}`}>
+                                {u.role || 'user'}
                              </span>
                           </td>
-                          <td className="px-8 py-6 text-[10px] font-mono text-white/40">{u.joinDate}</td>
+                          <td className="px-8 py-6 text-[10px] font-mono text-white/40">{u.createdAt ? new Date(u.createdAt?.seconds * 1000).toLocaleDateString() : 'Historical'}</td>
                           <td className="px-8 py-6">
                              <div className="flex items-center gap-2">
                                 <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shadow-[0_0_10px_rgba(0,255,0,0.5)]"></div>
-                                <span className="text-[10px] font-black uppercase text-white/80">Sync'd</span>
+                                <span className="text-[10px] font-black uppercase text-white/80">Active</span>
                              </div>
                           </td>
                           <td className="px-8 py-6">
-                             <button className="text-white/20 hover:text-magenta transition-colors"><ShieldCheck size={18} /></button>
+                             <button 
+                               onClick={() => toggleAdmin(u)}
+                               className={`transition-colors p-2 rounded-xl border ${u.role === 'admin' ? 'text-magenta border-magenta/30 bg-magenta/10' : 'text-white/20 border-white/10 hover:text-white hover:border-white/30'}`}
+                             >
+                               <ShieldCheck size={18} />
+                             </button>
                           </td>
                        </tr>
                     ))}
                  </tbody>
               </table>
+           </motion.div>
+        )}
+
+        {/* Requests Management */}
+        {activeSubTab === 'requests' && (
+           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                 {requests.map(req => (
+                   <div key={req.id} className="bg-white/5 border border-white/10 p-6 rounded-[2.5rem] space-y-4 group">
+                      <div className="flex justify-between items-start">
+                         <div className="w-12 h-12 rounded-2xl bg-brand/20 flex items-center justify-center text-[var(--brand-color)]">
+                            <Music2 size={24} />
+                         </div>
+                         <span className={`px-2 py-1 rounded-full text-[8px] font-black uppercase ${req.status === 'pending' ? 'bg-yellow-500/20 text-yellow-500' : req.status === 'processed' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}`}>
+                            {req.status}
+                         </span>
+                      </div>
+                      <div>
+                         <p className="text-lg font-black italic uppercase tracking-tighter text-white truncate">{req.songName}</p>
+                         <p className="text-xs font-bold text-white/30 truncate">{req.artist || 'Unknown Artist'}</p>
+                      </div>
+                      <div className="pt-4 border-t border-white/5 flex items-center justify-between">
+                         <div className="flex flex-col">
+                            <p className="text-[10px] font-black text-white/20 uppercase tracking-[0.2em]">Requester</p>
+                            <p className="text-[9px] font-bold text-white/40">{req.requesterEmail}</p>
+                         </div>
+                         <div className="flex gap-2">
+                            <button onClick={() => updateRequestStatus(req.id, 'rejected')} className="p-2 text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"><X size={14} /></button>
+                            <button onClick={() => updateRequestStatus(req.id, 'processed')} className="p-2 text-green-400 hover:bg-green-400/10 rounded-lg transition-colors"><CheckCircle2 size={14} /></button>
+                         </div>
+                      </div>
+                   </div>
+                 ))}
+                 {requests.length === 0 && (
+                   <div className="col-span-full py-20 text-center space-y-4">
+                      <MessageSquare size={48} className="mx-auto text-white/5" />
+                      <p className="text-white/20 font-black uppercase tracking-[0.5em] text-xs">No pending requests in the queue</p>
+                   </div>
+                 )}
+              </div>
            </motion.div>
         )}
 
@@ -2062,13 +2635,20 @@ const SidebarItem: React.FC<SidebarItemProps> = ({ icon, label, active = false, 
   return (
     <div 
       onClick={onClick}
-      className={`flex items-center space-x-4 transition-all cursor-pointer px-4 py-3 rounded-2xl ${active ? "bg-white/10 text-white shadow-xl" : "text-white/50 hover:text-white hover:bg-white/5"}`}
+      className={`flex items-center space-x-4 transition-all cursor-pointer px-4 py-3 rounded-2xl ${active ? "bg-emerald-500 text-black shadow-xl" : "text-white/50 hover:text-white hover:bg-white/5"}`}
     >
       {icon}
       <span className="font-bold text-sm tracking-tight">{label}</span>
     </div>
   );
 }
+
+const MobileNavItem = ({ icon, label, active, onClick }: any) => (
+  <button onClick={onClick} className={`flex flex-col items-center gap-1 transition-all ${active ? "text-emerald-400" : "text-white/40"}`}>
+    {icon}
+    <span className="text-[10px] font-bold uppercase tracking-tight">{label}</span>
+  </button>
+);
 
 interface SidebarPlaylistProps { id?: string; name: string; onClick: () => void; }
 const SidebarPlaylist: React.FC<SidebarPlaylistProps> = ({ name, onClick }) => {

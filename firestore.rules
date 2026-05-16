@@ -32,6 +32,18 @@ service cloud.firestore {
       allow write: if isOwner(userId) || isAdmin();
     }
 
+    match /song-requests/{requestId} {
+      function isValidRequest(data) {
+        return data.keys().hasAll(['songName', 'requesterId', 'status', 'createdAt']) &&
+               data.songName is string && data.songName.size() <= 200 &&
+               data.requesterId == request.auth.uid;
+      }
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidRequest(request.resource.data);
+      allow update: if isAdmin();
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.requesterId == request.auth.uid);
+    }
+
     match /playlists/{playlistId} {
       function isValidPlaylist(data) {
         return data.keys().hasAll(['name', 'ownerId', 'tracks']) &&

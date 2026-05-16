@@ -18,6 +18,33 @@
   --app-bg: #050506;
   --text-primary: #F8F8F8;
   --card-bg: rgba(10, 10, 12, 0.4);
+  --brand-color: #10B981; /* Default emerald-500 */
+  --brand-shadow: rgba(16, 185, 129, 0.3);
+}
+
+.theme-emerald {
+  --brand-color: #10B981;
+  --brand-shadow: rgba(16, 185, 129, 0.3);
+}
+
+.theme-magenta {
+  --brand-color: #FF00FF;
+  --brand-shadow: rgba(255, 0, 255, 0.3);
+}
+
+.theme-blue {
+  --brand-color: #00F2FF;
+  --brand-shadow: rgba(0, 242, 255, 0.3);
+}
+
+.theme-orange {
+  --brand-color: #F97316;
+  --brand-shadow: rgba(249, 115, 22, 0.3);
+}
+
+.theme-purple {
+  --brand-color: #8B5CF6;
+  --brand-shadow: rgba(139, 92, 246, 0.3);
 }
 
 :root.light {

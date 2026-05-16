@@ -9,9 +9,26 @@
         "displayName": { "type": "string" },
         "email": { "type": "string" },
         "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "themePreference": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "email"]
+    },
+    "SongRequest": {
+      "title": "Song Request",
+      "description": "A user's request for a song",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "songName": { "type": "string" },
+        "artist": { "type": "string" },
+        "requesterEmail": { "type": "string" },
+        "requesterId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "processed", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["songName", "requesterId"]
     },
     "Playlist": {
       "title": "Playlist",
@@ -66,6 +83,10 @@
     "/users/{userId}": {
       "schema": "User",
       "description": "Public and private user profiles"
+    },
+    "/song-requests/{requestId}": {
+      "schema": "SongRequest",
+      "description": "User song requests"
     },
     "/playlists/{playlistId}": {
       "schema": "Playlist",

@@ -9,12 +9,41 @@ import axios from "axios";
 import FormData from "form-data";
 import { GoogleGenAI } from "@google/genai";
 
-let trendingCache: any[] = [];
-let dailyPick: any = null;
+let trendingCache: any[] = [
+  {
+    id: "hTWKbfoikeg",
+    title: "Global Viral Mix 2026",
+    author: "MusicFlow Discovery",
+    thumbnail: "https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400",
+    duration: "1:02:40",
+    url: "https://www.youtube.com/watch?v=hTWKbfoikeg",
+    category: "Trending",
+    type: "track"
+  },
+  {
+    id: "kJQP7kiw5Fk",
+    title: "Lofi Hip Hop Radio - Beats to relax/study to",
+    author: "Lofi Girl",
+    thumbnail: "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=400",
+    duration: "LIVE",
+    url: "https://www.youtube.com/watch?v=kJQP7kiw5Fk",
+    category: "Relaxation",
+    type: "track"
+  }
+];
+let dailyPick: any = trendingCache[0];
 let lastTrendingUpdate = 0;
+
+async function ytSearchWithTimeout(query: string | any, timeoutMs: number = 10000) {
+  return Promise.race([
+    ytSearch(query),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Search timeout")), timeoutMs))
+  ]) as Promise<any>;
+}
 
 async function updateTrending() {
   try {
+    console.log("Updating trending cache...");
     const currentYear = 2026;
     const currentMonth = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(new Date());
     
@@ -31,14 +60,18 @@ async function updateTrending() {
       "Best New Nigerian Afrobeat Albums 2026 - Best of Naija"
     ];
     
-    const allResults = await Promise.all(queries.map(async (query, i) => {
+    // Process queries in smaller batches to avoid hitting YouTube limits too hard
+    const resultsMap = [];
+    for (let i = 0; i < queries.length; i++) {
       try {
-        const results = await ytSearch(query);
+        const query = queries[i];
+        console.log(`Searching trending: ${query}`);
+        const results = await ytSearchWithTimeout(query);
         const category = categories[i];
         const categoryResults: any[] = [];
         
         // Add tracks
-        const videos = results.videos.slice(0, 15).map(v => ({
+        const videos = results.videos.slice(0, 15).map((v: any) => ({
           id: v.videoId,
           title: v.title,
           thumbnail: v.thumbnail,
@@ -52,7 +85,7 @@ async function updateTrending() {
         categoryResults.push(...videos);
   
         // Add playlists/albums for this category
-        const playlists = results.playlists.slice(0, 5).map(p => ({
+        const playlists = results.playlists.slice(0, 5).map((p: any) => ({
           id: p.listId,
           title: p.title,
           thumbnail: p.thumbnail,
@@ -63,23 +96,34 @@ async function updateTrending() {
           trackCount: p.videoCount
         }));
         categoryResults.push(...playlists);
-        return categoryResults;
-      } catch (err) {
-        console.error(`Search failed for ${query}:`, err);
-        return [];
-      }
-    }));
-    
-    trendingCache = allResults.flat();
-    
-    // Set daily pick from trending
-    const tracksOnly = trendingCache.filter(t => t.type === 'track');
-    if (tracksOnly.length > 0) {
-      dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
-    }
+        resultsMap.push(categoryResults);
 
-    lastTrendingUpdate = Date.now();
-    console.log("Trending cache updated with", trendingCache.length, "items");
+        // Small delay between searches
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (err) {
+        console.error(`Search failed for ${queries[i]}:`, err);
+      }
+    }
+    
+    if (resultsMap.length > 0) {
+      const flattened = resultsMap.flat();
+      // Use Map to deduplicate by ID
+      const deduplicatedMap = new Map();
+      flattened.forEach(item => {
+        if (!deduplicatedMap.has(item.id)) {
+          deduplicatedMap.set(item.id, item);
+        }
+      });
+      trendingCache = Array.from(deduplicatedMap.values());
+      
+      // Set daily pick from trending
+      const tracksOnly = trendingCache.filter(t => t.type === 'track');
+      if (tracksOnly.length > 0) {
+        dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
+      }
+      lastTrendingUpdate = Date.now();
+      console.log("Trending cache updated with", trendingCache.length, "items (deduplicated)");
+    }
   } catch (error) {
     console.error("Failed to update trending cache:", error);
   }
@@ -105,7 +149,7 @@ async function startServer() {
     const artist = req.query.artist as string;
     if (!artist) return res.json([]);
     try {
-      const results = await ytSearch(`${artist} similar artists hits`);
+      const results = await ytSearchWithTimeout(`${artist} similar artists hits`);
       const videos = results.videos.slice(0, 8).map(v => ({
         id: v.videoId,
         title: v.title,
@@ -123,11 +167,17 @@ async function startServer() {
 
   app.get("/api/search", async (req, res) => {
     const q = req.query.q as string;
+    const type = req.query.type as string; // track, album, artist
+    const genre = req.query.genre as string;
     if (!q) return res.status(400).json({ error: "Query is required" });
 
     try {
-      const results = await ytSearch(q);
-      const videos = results.videos.slice(0, 20).map(v => ({
+      let searchQuery = q;
+      if (genre && genre !== 'all') searchQuery += ` ${genre}`;
+      if (type && type !== 'all') searchQuery += ` ${type}`;
+
+      const results = await ytSearchWithTimeout(searchQuery);
+      let videos = results.videos.slice(0, 20).map((v: any) => ({
         id: v.videoId,
         title: v.title,
         thumbnail: v.thumbnail,
@@ -136,7 +186,8 @@ async function startServer() {
         url: v.url,
         type: "track"
       }));
-      const playlists = results.playlists.slice(0, 5).map(p => ({
+
+      let playlists = results.playlists.slice(0, 5).map((p: any) => ({
         id: p.listId,
         title: p.title,
         thumbnail: p.thumbnail,
@@ -146,46 +197,67 @@ async function startServer() {
         trackCount: p.videoCount
       }));
 
+      // Filter local results if type is specified
+      if (type === 'track') {
+        playlists = [];
+      } else if (type === 'album') {
+        videos = [];
+      }
+
       // Search artists and albums via Deezer with better filtering
       let artists: any[] = [];
       let dzAlbums: any[] = [];
       try {
+        const deezerQuery = genre && genre !== 'all' ? `${q} ${genre}` : q;
         const [artRes, albRes, searchRes] = await Promise.all([
-           axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=15`),
-           axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=15`),
-           axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`)
+           axios.get(`https://api.deezer.com/search/artist?q=${encodeURIComponent(deezerQuery)}&limit=15`),
+           axios.get(`https://api.deezer.com/search/album?q=${encodeURIComponent(deezerQuery)}&limit=15`),
+           axios.get(`https://api.deezer.com/search?q=${encodeURIComponent(deezerQuery)}&limit=20`)
         ]);
 
-        artists = artRes.data.data.map((a: any) => ({
-          id: a.id,
-          name: a.name,
-          title: a.name,
-          thumbnail: a.picture_medium,
-          type: "artist",
-          fans: a.nb_fan,
-          author: "Verified Artist"
-        }));
+        if (type === 'all' || type === 'artist') {
+          artists = artRes.data.data.map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            title: a.name,
+            thumbnail: a.picture_medium,
+            type: "artist",
+            fans: a.nb_fan,
+            author: "Verified Artist"
+          }));
+        }
 
-        dzAlbums = albRes.data.data.map((a: any) => ({
-          id: a.id,
-          title: a.title,
-          thumbnail: a.cover_medium,
-          author: a.artist.name,
-          type: "album",
-          trackCount: a.nb_tracks || "Album"
-        }));
+        if (type === 'all' || type === 'album') {
+          dzAlbums = albRes.data.data.map((a: any) => ({
+            id: a.id,
+            title: a.title,
+            thumbnail: a.cover_medium,
+            author: a.artist.name,
+            type: "album",
+            trackCount: a.nb_tracks || "Album"
+          }));
+        }
 
-        const dzTracks = searchRes.data.data.map((t: any) => ({
-          id: t.id,
-          title: t.title,
-          thumbnail: t.album.cover_medium,
-          author: t.artist.name,
-          url: `https://www.youtube.com/results?search_query=${encodeURIComponent(t.artist.name + ' ' + t.title)}`,
-          type: "track",
-          duration: t.duration
-        }));
+        let dzTracks: any[] = [];
+        if (type === 'all' || type === 'track') {
+          dzTracks = searchRes.data.data.map((t: any) => ({
+            id: t.id,
+            title: t.title,
+            thumbnail: t.album.cover_medium,
+            author: t.artist.name,
+            url: `https://www.youtube.com/results?search_query=${encodeURIComponent(t.artist.name + ' ' + t.title)}`,
+            type: "track",
+            duration: t.duration
+          }));
+        }
 
-        res.json([...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos]);
+        let combined = [];
+        if (type === 'artist') combined = artists;
+        else if (type === 'album') combined = [...dzAlbums, ...playlists];
+        else if (type === 'track') combined = [...dzTracks, ...videos];
+        else combined = [...artists, ...dzAlbums, ...dzTracks, ...playlists, ...videos];
+
+        res.json(combined);
         return;
       } catch (e) {
         console.error("Deezer search failed:", e);
@@ -232,7 +304,7 @@ async function startServer() {
 
   app.get("/api/videos/trending", async (req, res) => {
     try {
-      const results = await ytSearch("trending music videos 2026");
+      const results = await ytSearchWithTimeout("trending music videos 2026");
       const videos = results.videos.slice(0, 20).map(v => ({
         id: v.videoId,
         title: v.title,
@@ -325,7 +397,7 @@ async function startServer() {
       }
 
       // Otherwise assume it's a YouTube listId
-      const results = await ytSearch({ listId: id });
+      const results = await ytSearchWithTimeout({ listId: id });
       if (!results || !results.videos) {
         return res.status(404).json({ tracks: [], error: "Album not found" });
       }
@@ -380,7 +452,7 @@ async function startServer() {
     } catch (error) {
       console.error("Error fetching video info with ytdl, trying yt-search fallback:", error);
       try {
-        const searchResults = await ytSearch(url);
+        const searchResults = await ytSearchWithTimeout(url);
         if (searchResults.videos.length > 0) {
           const v = searchResults.videos[0];
           return res.json({
@@ -406,7 +478,7 @@ async function startServer() {
     // If it's a results page or just query text, search for the first video
     if (!url.includes("watch?v=") && !url.includes("youtu.be/")) {
       try {
-        const searchResults = await ytSearch(url);
+        const searchResults = await ytSearchWithTimeout(url);
         if (searchResults.videos.length > 0) {
           url = searchResults.videos[0].url;
         } else {
@@ -521,11 +593,12 @@ async function startServer() {
   async function getFallbackStreamUrl(url: string) {
     try {
       console.log("Attempting fallbacks for:", url);
-      // Try multiple fallback sources
+      // Try multiple fallback sources known to work reliably
       const sources = [
-        `https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`,
         `https://apis.prexzyvilla.site/download/aio?url=${encodeURIComponent(url)}`,
-        `https://api.cobalt.tools/api/json` 
+        `https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`,
+        `https://api.cobalt.tools/api/json`,
+        `https://api.vyt.pp.ua/api/info?url=${encodeURIComponent(url)}` // Often returns direct urls
       ];
 
       for (const src of sources) {
@@ -545,9 +618,16 @@ async function startServer() {
           } else if (src.includes("prexzyvilla")) {
             const content = data?.result || data?.data || data;
             const medias = content?.medias || [];
-            const audio = medias.find((m: any) => m.type === 'audio') || medias[0];
+            // Prefer audio-only for streaming, or highest quality for download
+            const audio = medias.find((m: any) => m.type === 'audio' || m.extension === 'mp3') || medias[0];
             const downloadUrl = audio?.url || content?.high || content?.low || content?.url;
             if (downloadUrl) return downloadUrl;
+          } else if (src.includes("vyt.pp.ua")) {
+            if (data.formats) {
+               // Find highest audio format
+               const audio = data.formats.filter((f: any) => f.acodec !== 'none' && f.vcodec === 'none').sort((a: any, b: any) => b.abr - a.abr)[0];
+               if (audio?.url) return audio.url;
+            }
           } else {
             const genericData = data?.data || data?.result || data;
             const downloadUrl = genericData.high || genericData.low || genericData.audio || genericData.url || (genericData.links && genericData.links[0]?.url);
@@ -675,10 +755,21 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
     
-    // Kick off trending update after server is listening
-    updateTrending();
+    // Kick off trending update after a short delay so server can handle early requests
+    setTimeout(() => {
+      updateTrending().catch(err => console.error("Initial trending update failed:", err));
+    }, 1000);
+  });
+
+  // Global uncaught error handling to prevent process crash
+  process.on('uncaughtException', (err) => {
+    console.error('URGENT: Uncaught Exception:', err);
+  });
+  
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('URGENT: Unhandled Rejection at:', promise, 'reason:', reason);
   });
 }
 
