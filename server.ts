@@ -9,6 +9,10 @@ import axios from "axios";
 import FormData from "form-data";
 import { GoogleGenAI } from "@google/genai";
 
+const DATA_FILE = path.join(process.cwd(), "trending.json");
+const ARTIST_DATA_FILE = path.join(process.cwd(), "artist_discographies.json");
+const TRENDING_2026_FILE = path.join(process.cwd(), "trending_2026.json");
+
 let trendingCache: any[] = [
   {
     id: "hTWKbfoikeg",
@@ -31,6 +35,36 @@ let trendingCache: any[] = [
     type: "track"
   }
 ];
+
+function loadPersistedData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        trendingCache = parsed;
+        const tracksOnly = trendingCache.filter(t => t.type === 'track');
+        if (tracksOnly.length > 0) {
+          dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
+        } else {
+          dailyPick = trendingCache[0];
+        }
+        console.log(`Loaded ${trendingCache.length} items from ${DATA_FILE}`);
+      }
+    }
+  } catch (err) {
+    console.error("Failed to load persisted data:", err);
+  }
+}
+
+function savePersistedData() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(trendingCache, null, 2));
+    console.log(`Persisted ${trendingCache.length} items to ${DATA_FILE}`);
+  } catch (err) {
+    console.error("Failed to persist data:", err);
+  }
+}
 let dailyPick: any = trendingCache[0];
 let lastTrendingUpdate = 0;
 
@@ -44,62 +78,86 @@ async function ytSearchWithTimeout(query: string | any, timeoutMs: number = 1000
 async function updateTrending() {
   try {
     console.log("Updating trending cache...");
+    
+    // Load static data first to respond quickly
+    let staticTrending: any[] = [];
+    try {
+      if (fs.existsSync(TRENDING_2026_FILE)) {
+        const raw = fs.readFileSync(TRENDING_2026_FILE, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (parsed.trending_2026) staticTrending = parsed.trending_2026;
+      }
+    } catch (e) {}
+
+    // Initial population from static data if cache is empty or minimal
+    if (trendingCache.length < 10 && staticTrending.length > 0) {
+      const initialStatic = staticTrending.slice(0, 20).map((item: any, idx: number) => ({
+        id: `static-${idx}`,
+        title: item.title,
+        author: item.artist,
+        thumbnail: `https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400&sig=${idx}`,
+        duration: "3:30",
+        url: `https://www.youtube.com/results?search_query=${encodeURIComponent(item.artist + ' ' + item.title)}`,
+        category: "Trending",
+        type: "track",
+        year: "2026",
+        isEssential: true
+      }));
+      trendingCache = [...initialStatic, ...trendingCache];
+    }
+
     const currentYear = 2026;
     const currentMonth = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(new Date());
     
-    const categories = ["Trending", "Afrobeats", "UK Drill", "Asian", "Hip Hop", "Drill", "Amapiano", "Electronic", "Albums"];
+    const categories = ["Trending", "Afrobeats", "Asian", "Electronic", "Albums"];
     const queries = [
       `top global music hits ${currentMonth} 2026`, 
       "Top Trending Nigerian Afrobeats Hits 2026", 
-      "Latest Naija Music 2026 Afrobeat Anthems",
       "Trending Asian Hits 2026 K-Pop J-Pop",
-      "Official Billboard Hip Hop Charts 2026", 
-      "Global Drill Music Trends 2026",
-      "New Amapiano 2026 Viral Mix",
       "Top Trending Electronic and House 2026", 
-      "Best New Nigerian Afrobeat Albums 2026 - Best of Naija"
+      "Best New Nigerian Afrobeat Albums 2026"
     ];
     
-    // Process queries in smaller batches to avoid hitting YouTube limits too hard
     const resultsMap = [];
-    for (let i = 0; i < queries.length; i++) {
+    // Only search 3 categories in background to save resources
+    for (let i = 0; i < Math.min(queries.length, 3); i++) {
       try {
         const query = queries[i];
-        console.log(`Searching trending: ${query}`);
-        const results = await ytSearchWithTimeout(query);
+        const results = await ytSearchWithTimeout(query, 10000);
         const category = categories[i];
         const categoryResults: any[] = [];
         
-        // Add tracks
-        const videos = results.videos.slice(0, 15).map((v: any) => ({
-          id: v.videoId,
-          title: v.title,
-          thumbnail: v.thumbnail,
-          duration: v.timestamp,
-          author: v.author.name,
-          url: v.url,
-          category: category,
-          type: "track",
-          year: currentYear.toString()
-        }));
-        categoryResults.push(...videos);
+        if (results && results.videos) {
+          const videos = results.videos.slice(0, 8).map((v: any) => ({
+            id: v.videoId,
+            title: v.title,
+            thumbnail: v.thumbnail,
+            duration: v.timestamp,
+            author: v.author.name,
+            url: v.url,
+            category: category,
+            type: "track",
+            year: currentYear.toString()
+          }));
+          categoryResults.push(...videos);
+        }
   
-        // Add playlists/albums for this category
-        const playlists = results.playlists.slice(0, 5).map((p: any) => ({
-          id: p.listId,
-          title: p.title,
-          thumbnail: p.thumbnail,
-          author: p.author.name,
-          url: p.url,
-          category: category,
-          type: "album",
-          trackCount: p.videoCount
-        }));
-        categoryResults.push(...playlists);
+        if (results && results.playlists) {
+          const playlists = results.playlists.slice(0, 3).map((p: any) => ({
+            id: p.listId,
+            title: p.title,
+            thumbnail: p.thumbnail,
+            author: p.author.name,
+            url: p.url,
+            category: category,
+            type: "album",
+            trackCount: p.videoCount
+          }));
+          categoryResults.push(...playlists);
+        }
+        
         resultsMap.push(categoryResults);
-
-        // Small delay between searches
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (err) {
         console.error(`Search failed for ${queries[i]}:`, err);
       }
@@ -107,22 +165,24 @@ async function updateTrending() {
     
     if (resultsMap.length > 0) {
       const flattened = resultsMap.flat();
-      // Use Map to deduplicate by ID
       const deduplicatedMap = new Map();
-      flattened.forEach(item => {
-        if (!deduplicatedMap.has(item.id)) {
+      flattened.forEach((item) => {
+        if (item && item.id && !deduplicatedMap.has(item.id)) {
           deduplicatedMap.set(item.id, item);
         }
       });
-      trendingCache = Array.from(deduplicatedMap.values());
       
-      // Set daily pick from trending
-      const tracksOnly = trendingCache.filter(t => t.type === 'track');
-      if (tracksOnly.length > 0) {
-        dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
+      const newCache = Array.from(deduplicatedMap.values());
+      if (newCache.length > 0) {
+        trendingCache = newCache;
+        const tracksOnly = trendingCache.filter(t => t.type === 'track');
+        if (tracksOnly.length > 0) {
+          dailyPick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
+        }
+        lastTrendingUpdate = Date.now();
+        savePersistedData();
+        console.log("Trending cache updated successfully.");
       }
-      lastTrendingUpdate = Date.now();
-      console.log("Trending cache updated with", trendingCache.length, "items (deduplicated)");
     }
   } catch (error) {
     console.error("Failed to update trending cache:", error);
@@ -134,6 +194,7 @@ async function updateTrending() {
 setInterval(updateTrending, 12 * 60 * 60 * 1000);
 
 async function startServer() {
+  loadPersistedData();
   const app = express();
   const PORT = 3000;
 
@@ -279,25 +340,60 @@ async function startServer() {
         axios.get(`https://api.deezer.com/artist/${id}/albums?limit=100`)
       ]);
 
+      const artistName = info.data.name;
+
       // Fetch Wikipedia bio
       let bio = "";
       try {
-        const wikiRes = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(info.data.name)}`, { timeout: 5000 });
+        const wikiRes = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(artistName)}`, { timeout: 5000 });
         bio = wikiRes.data.extract || "";
       } catch (e) {
         try {
-          const wikiRes2 = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(info.data.name + ' (musician)')}`, { timeout: 5000 });
+          const wikiRes2 = await axios.get(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(artistName + ' (musician)')}`, { timeout: 5000 });
           bio = wikiRes2.data.extract || "";
         } catch (e2) {}
       }
 
+      // If bio is still missing or very short, use Gemini
+      if (!bio || bio.length < 200) {
+        try {
+          const ai = new GoogleGenAI({
+            apiKey: process.env.GEMINI_API_KEY,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+          });
+          const geminiResponse = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `Provide a detailed, professional, and engaging biography for the music artist "${artistName}". Include their origins, musical style, key achievements, and impact on the industry. Keep it around 250 words. Return only the biography text.`
+          });
+          if (geminiResponse.text) {
+            bio = geminiResponse.text;
+          }
+        } catch (err) {
+          console.error("Gemini bio generation failed:", err);
+        }
+      }
+
+      const tracks = topTracks.data.data || [];
+      const artistAlbums = albums.data.data || [];
+
+      // Categorize
+      const trendingTracks = tracks.slice(0, 10); // Deezer top tracks are already popular/trending
+      const allTracks = tracks;
+      
+      const trendingAlbums = [...artistAlbums]
+        .sort((a, b) => new Date(b.release_date).getTime() - new Date(a.release_date).getTime())
+        .slice(0, 4);
+      
       res.json({
         info: info.data,
-        tracks: topTracks.data.data || [],
-        albums: albums.data.data || [],
+        tracks: allTracks,
+        trendingTracks,
+        albums: artistAlbums,
+        trendingAlbums,
         bio
       });
     } catch (err) {
+      console.error("Failed to fetch artist data:", err);
       res.status(500).json({ error: "Failed to fetch artist data" });
     }
   });
@@ -518,31 +614,79 @@ async function startServer() {
     } catch (error) {
       console.error("YTDL download failed, trying fallback...", error);
       
-      const fallbackUrl = await getFallbackStreamUrl(url);
-      if (fallbackUrl) {
-         if (format === "mp3") res.header("Content-Type", "audio/mpeg");
-         else res.header("Content-Type", "video/mp4");
-         res.header("Content-Disposition", `attachment; filename="download.${format}"`);
-         return proxyStream(fallbackUrl, res);
+      if (!res.headersSent) {
+        if (format === "mp3") res.header("Content-Type", "audio/mpeg");
+        else res.header("Content-Type", "video/mp4");
+        res.header("Content-Disposition", `attachment; filename="download.${format}"`);
+        await streamWithFallbacks(url, res);
       }
-
-      res.status(500).json({ error: "Download failed. YouTube's bot detection might be blocking this request." });
     }
   });
 
   app.get("/api/trending", (req, res) => {
     try {
-      res.json(trendingCache || []);
+      if (!trendingCache || trendingCache.length === 0) {
+        // Safe fallback if for some reason cache is empty
+        return res.json([
+          {
+            id: "hTWKbfoikeg",
+            title: "Global Viral Mix 2026",
+            author: "MusicFlow Discovery",
+            thumbnail: "https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400",
+            duration: "1:02:40",
+            url: "https://www.youtube.com/watch?v=hTWKbfoikeg",
+            category: "Trending",
+            type: "track"
+          }
+        ]);
+      }
+      // Shuffle the results slightly for variety on every call
+      const shuffled = [...trendingCache].sort(() => Math.random() - 0.5);
+      res.json(shuffled);
     } catch (err) {
-      res.status(500).json({ error: "Failed to serve trending cache" });
+      console.error("Trending API Error:", err);
+      res.status(500).json({ error: "Failed to serve trending cache", details: String(err) });
+    }
+  });
+
+  app.get("/api/static/artist-discography", (req, res) => {
+    try {
+      if (fs.existsSync(ARTIST_DATA_FILE)) {
+        const data = fs.readFileSync(ARTIST_DATA_FILE, "utf-8");
+        return res.json(JSON.parse(data));
+      }
+      res.json({});
+    } catch (e) {
+      res.status(500).json({ error: "Failed to load static discography" });
+    }
+  });
+
+  app.get("/api/static/trending-2026", (req, res) => {
+    try {
+      if (fs.existsSync(TRENDING_2026_FILE)) {
+        const data = fs.readFileSync(TRENDING_2026_FILE, "utf-8");
+        return res.json(JSON.parse(data));
+      }
+      res.json({ trending_2026: [] });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to load static trending" });
     }
   });
 
   app.get("/api/daily-pick", (req, res) => {
     try {
-      res.json(dailyPick || null);
+      // Force pick a new one every time for freshness
+      const tracksOnly = (trendingCache || []).filter(t => t.type === 'track');
+      let pick = null;
+      if (tracksOnly.length > 0) {
+        pick = tracksOnly[Math.floor(Math.random() * tracksOnly.length)];
+      } else if (trendingCache && trendingCache.length > 0) {
+        pick = trendingCache[Math.floor(Math.random() * trendingCache.length)];
+      }
+      res.json(pick || null);
     } catch (err) {
-      res.status(500).json({ error: "Failed to serve daily pick" });
+      console.error("Daily Pick API Error:", err);
+      res.status(500).json({ error: "Failed to serve daily pick", details: String(err) });
     }
   });
 
@@ -550,126 +694,169 @@ async function startServer() {
     const url = req.query.url as string;
     if (!url) return res.status(400).json({ error: "URL is required" });
 
-    const ytdlOptions: ytdl.downloadOptions = {
-      filter: "audioonly",
-      quality: "highestaudio",
-      requestOptions: {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "*/*",
-          "Accept-Language": "en-US,en;q=0.9",
-        }
-      }
-    };
-
     try {
-      res.setHeader("Content-Type", "audio/mpeg");
-      const stream = ytdl(url, ytdlOptions);
-      
-      stream.on('error', async (err: any) => {
-        console.error("YTDL Stream Error:", err);
-        if (!res.headersSent) {
-          const fallbackUrl = await getFallbackStreamUrl(url);
-          if (fallbackUrl) {
-            return proxyStream(fallbackUrl, res);
+      const ytdlOptions: ytdl.downloadOptions = {
+        filter: "audioonly",
+        quality: "highestaudio",
+        requestOptions: {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
           }
-          res.status(500).json({ error: "Streaming failed after error" });
-        } else {
-          res.end();
         }
-      });
+      };
 
-      stream.pipe(res);
-    } catch (err) {
-      console.error("YTDL outer catch:", err);
-      const fallbackUrl = await getFallbackStreamUrl(url);
-      if (fallbackUrl) {
-        return proxyStream(fallbackUrl, res);
+      // Try local ytdl first
+      try {
+        const info = await ytdl.getBasicInfo(url, ytdlOptions);
+        if (info) {
+          res.setHeader("Content-Type", "audio/mpeg");
+          const stream = ytdl(url, ytdlOptions);
+          stream.on('error', (err) => {
+             console.error("YTDL Stream inner error, falling back...");
+             // If headers sent, we can't fall back to another response
+             if (!res.headersSent) streamWithFallbacks(url, res);
+          });
+          return stream.pipe(res);
+        }
+      } catch (e) {
+        console.log("YTDL direct stream failed, trying fallbacks...");
       }
-      res.status(500).json({ error: "Streaming failed" });
+
+      await streamWithFallbacks(url, res);
+    } catch (err) {
+      console.error("Master stream catch:", err);
+      if (!res.headersSent) res.status(500).json({ error: "Streaming failed" });
     }
   });
 
-  async function getFallbackStreamUrl(url: string) {
-    try {
-      console.log("Attempting fallbacks for:", url);
-      // Try multiple fallback sources known to work reliably
-      const sources = [
-        `https://apis.prexzyvilla.site/download/aio?url=${encodeURIComponent(url)}`,
-        `https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(url)}`,
-        `https://api.cobalt.tools/api/json`,
-        `https://api.vyt.pp.ua/api/info?url=${encodeURIComponent(url)}` // Often returns direct urls
-      ];
+  async function streamWithFallbacks(videoUrl: string, res: express.Response) {
+    const sources = [
+      `https://apis.prexzyvilla.site/download/aio?url=${encodeURIComponent(videoUrl)}`,
+      `https://dev-priyanshi.onrender.com/api/alldl?url=${encodeURIComponent(videoUrl)}`,
+      `https://api.vyt.pp.ua/api/info?url=${encodeURIComponent(videoUrl)}`,
+      `https://api.cobalt.tools/api/json`
+    ];
 
-      for (const src of sources) {
-        try {
-          if (src.includes("cobalt")) {
-             const cRes = await axios.post(src, { url, downloadMode: 'audio' }, { headers: { 'Accept': 'application/json' }, timeout: 10000 });
-             if (cRes.data?.url) return cRes.data.url;
-             continue;
+    for (const src of sources) {
+      try {
+        console.log(`Trying fallback source: ${src.split('?')[0]}`);
+        let streamUrl = null;
+        if (src.includes("cobalt")) {
+          try {
+            const cRes = await axios.post(src, { 
+              url: videoUrl, 
+              downloadMode: 'audio',
+              videoQuality: '720',
+              audioFormat: 'mp3'
+            }, { 
+              headers: { 
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+              }, 
+              timeout: 12000 
+            });
+            streamUrl = cRes.data?.url;
+          } catch (ce) {
+            console.log("Cobalt failed, continuing...");
           }
-          
-          const res = await axios.get(src, { timeout: 15000 });
-          const data = res.data;
+        } else {
+          const sRes = await axios.get(src, { timeout: 15000 });
+          const data = sRes.data;
           
           if (src.includes("priyanshi")) {
-            const audioUrl = data?.data?.high || data?.data?.low || data?.data?.url;
-            if (audioUrl) return audioUrl;
+            streamUrl = data?.data?.high || data?.data?.low || data?.data?.url;
           } else if (src.includes("prexzyvilla")) {
             const content = data?.result || data?.data || data;
             const medias = content?.medias || [];
-            // Prefer audio-only for streaming, or highest quality for download
-            const audio = medias.find((m: any) => m.type === 'audio' || m.extension === 'mp3') || medias[0];
-            const downloadUrl = audio?.url || content?.high || content?.low || content?.url;
-            if (downloadUrl) return downloadUrl;
+            // Prefer audio-only streams
+            const audio = medias.find((m: any) => (m.type === 'audio' || m.extension === 'mp3') && m.url) || medias[0];
+            streamUrl = audio?.url || content?.high || content?.low || content?.url;
           } else if (src.includes("vyt.pp.ua")) {
             if (data.formats) {
-               // Find highest audio format
-               const audio = data.formats.filter((f: any) => f.acodec !== 'none' && f.vcodec === 'none').sort((a: any, b: any) => b.abr - a.abr)[0];
-               if (audio?.url) return audio.url;
+              const audio = data.formats.filter((f: any) => f.acodec !== 'none' && f.vcodec === 'none').sort((a: any, b: any) => b.abr - a.abr)[0];
+              streamUrl = audio?.url || data.formats[0]?.url;
             }
-          } else {
-            const genericData = data?.data || data?.result || data;
-            const downloadUrl = genericData.high || genericData.low || genericData.audio || genericData.url || (genericData.links && genericData.links[0]?.url);
-            if (downloadUrl) return downloadUrl;
           }
-        } catch (e) {
-          console.log(`Fallback source ${src} failed or timed out`);
         }
+
+        if (streamUrl) {
+          console.log(`Attempting to proxy stream URL: ${streamUrl.substring(0, 40)}...`);
+          const success = await proxyStreamWithCheck(streamUrl, res);
+          if (success) {
+            console.log("Stream successfully proxied from fallback.");
+            return;
+          }
+
+          if (!res.headersSent) {
+            console.log("Proxy failed, attempting direct redirect as final fallback for this source...");
+            // Before redirecting, check if it's a googlevideo URl which usually fails on redirect unless user has right cookies
+            // But for other CDNs it might work
+            res.redirect(streamUrl);
+            return;
+          }
+        }
+      } catch (e: any) {
+        console.log(`Fallback ${src.split('?')[0]} failed: ${e.message}`);
       }
-    } catch (err) {
-      console.error("All fallback sources failed");
     }
-    return null;
+    
+    if (!res.headersSent) {
+      res.status(503).json({ 
+        error: "Resource currently unavailable via server proxy.", 
+        message: "This content is restricted or the fallback servers are over capacity. Try another track.",
+        suggestion: "If this persists, try searching for the specific official audio."
+      });
+    }
   }
 
-  async function proxyStream(url: string, res: express.Response) {
+  async function proxyStreamWithCheck(url: string, res: express.Response): Promise<boolean> {
     try {
+      // Don't proxy googlevideo directly if we can avoid it, but if we must...
+      // Some googlevideo links require the same IP. Our server IP might be blocked or different.
       const response = await axios.get(url, {
         responseType: 'stream',
-        timeout: 180000,
-        maxRedirects: 5,
+        timeout: 45000,
+        maxRedirects: 8,
         headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 
-          'Referer': 'https://www.youtube.com/' 
-        }
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+          'Range': 'bytes=0-' // Help some servers start streaming
+        },
+        validateStatus: (status) => status < 400
       });
       
       const contentType = (response.headers['content-type'] as string) || 'audio/mpeg';
-      res.setHeader("Content-Type", contentType);
-      if (response.headers['content-length']) {
+      // If it's a small response, it might be an error page disguised as success
+      const contentLen = parseInt(response.headers['content-length'] as string || "0");
+      
+      if (contentLen > 0 && contentLen < 5000 && !contentType.includes('audio')) {
+         console.warn("Stream response looks too small to be audio, failing check.");
+         return false;
+      }
+
+      if (!res.getHeader('Content-Type')) res.setHeader("Content-Type", contentType);
+      if (response.headers['content-length'] && !res.getHeader('Content-Length')) {
         res.setHeader("Content-Length", response.headers['content-length'] as string);
       }
       
-      response.data.pipe(res);
-      
-      response.data.on('error', (err: any) => {
-        console.error("Proxy stream data error:", err);
-        if (!res.headersSent) res.status(500).end();
+      return new Promise((resolve) => {
+        const stream = response.data.pipe(res);
+        stream.on('finish', () => resolve(true));
+        response.data.on('error', (err: any) => {
+          console.error("Proxy stream data error:", err.message);
+          resolve(false);
+        });
+        res.on('close', () => {
+          response.data.destroy();
+          resolve(true);
+        });
       });
-    } catch (err) {
-      console.error("Proxy stream failed:", err);
-      if (!res.headersSent) res.status(500).json({ error: "Failed to proxy stream" });
+    } catch (err: any) {
+      const status = err.response?.status || 'Error';
+      console.error(`Proxy failure for URL: ${url.substring(0, 30)}... Status: ${status}`);
+      return false;
     }
   }
 

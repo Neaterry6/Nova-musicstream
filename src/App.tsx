@@ -206,6 +206,8 @@ export default function App() {
   const [downloadModal, setDownloadModal] = useState<any | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dailyPick, setDailyPick] = useState<any | null>(null);
+  const [staticArtistData, setStaticArtistData] = useState<any>({});
+  const [staticTrending2026, setStaticTrending2026] = useState<any[]>([]);
   const [recommendations, setRecommendations] = useState<Track[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<string>(localStorage.getItem('theme') || 'emerald');
@@ -470,6 +472,10 @@ export default function App() {
 
     fetchDailyPick();
     
+    // Fetch static data
+    fetch("/api/static/artist-discography").then(r => r.json()).then(setStaticArtistData).catch(() => {});
+    fetch("/api/static/trending-2026").then(r => r.json()).then(d => setStaticTrending2026(d.trending_2026 || [])).catch(() => {});
+
     const savedHistory = localStorage.getItem("music_history");
     if (savedHistory) setHistory(JSON.parse(savedHistory));
   }, []);
@@ -500,6 +506,18 @@ export default function App() {
       localStorage.setItem("music_history", JSON.stringify(newHistory));
     }
   }, [currentTrack]);
+
+  const handleHomeNavigation = () => {
+    setActiveTab("home");
+    // Shuffling tracks for visual variety on return
+    if (trendingTracks.length > 0) {
+      setTrendingTracks(prev => [...prev].sort(() => Math.random() - 0.5));
+    }
+    // Also refresh daily pick to feel fresh
+    if (Math.random() > 0.5) {
+       fetch("/api/daily-pick").then(r => r.json()).then(d => d && setDailyPick(d)).catch(() => {});
+    }
+  };
 
   useEffect(() => {
     if (user && !authLoading) {
@@ -670,6 +688,37 @@ export default function App() {
     setFetchingArtist(true);
     setSelectedArtist(null);
     setActiveTab("artist-view");
+    
+    // Check if we have static data (match by name)
+    const artistKey = artist.name.toLowerCase().replace(/\s+/g, '_');
+    if (staticArtistData[artistKey]) {
+      const mockInfo = {
+        name: artist.name,
+        picture_xl: artist.img || artist.thumbnail || `https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800`,
+        nb_fan: 5000000,
+        genres: { data: [{ id: 1, name: 'Afrobeats' }] }
+      };
+      
+      const tracks = staticArtistData[artistKey].map((t: any, i: number) => ({
+        id: `static-${artistKey}-${i}`,
+        title: t.title,
+        release_date: t.release_date,
+        duration: "3:45",
+        album: { title: "Essential Collection", cover_medium: mockInfo.picture_xl }
+      }));
+
+      setSelectedArtist({
+        info: mockInfo,
+        tracks: tracks,
+        trendingTracks: tracks.slice(0, 5),
+        albums: [{ id: `essential-${artistKey}`, title: "Discography", cover_medium: mockInfo.picture_xl, release_date: "2026-01-01" }],
+        trendingAlbums: [{ id: `essential-${artistKey}`, title: "Featured Collection", cover_medium: mockInfo.picture_xl, release_date: "2026-05-16" }],
+        bio: `${artist.name} is a leading figure in the music scene, known for their unique style and chart-topping hits included in this essential collection.`
+      });
+      setFetchingArtist(false);
+      return;
+    }
+
     try {
       const res = await fetch(`/api/artist/${artist.id}`);
       const data = await res.json();
@@ -681,13 +730,15 @@ export default function App() {
     }
   };
 
-  const handleSearch = async (e?: React.FormEvent) => {
+  const handleSearch = async (e?: React.FormEvent, customQuery?: string) => {
     if (e) e.preventDefault();
-    if (!searchQuery) return;
+    const queryToUse = customQuery || searchQuery;
+    if (!queryToUse) return;
+    if (customQuery) setSearchQuery(customQuery);
     setShowSuggestions(false);
     setIsSearching(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}&type=${searchType}&genre=${searchGenre}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(queryToUse)}&type=${searchType}&genre=${searchGenre}`);
       const data = await res.json();
       setSearchResults(data);
       setActiveTab("downloader");
@@ -834,7 +885,7 @@ export default function App() {
           <nav className="space-y-6 flex-1 overflow-y-auto no-scrollbar">
             <div className="space-y-2">
               <p className="text-[10px] uppercase tracking-[0.2em] text-white/40 font-bold px-2">Menu</p>
-              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={() => setActiveTab("home")} />
+              <SidebarItem icon={<Home size={20} />} label="Home" active={activeTab === "home"} onClick={handleHomeNavigation} />
               <SidebarItem icon={<TrendingUp size={20} />} label="Trending" active={activeTab === "trending"} onClick={() => setActiveTab("trending")} />
               <SidebarItem icon={<VideoIcon size={20} />} label="Videos" active={activeTab === "videos"} onClick={() => setActiveTab("videos")} />
               <SidebarItem icon={<Mic2 size={20} />} label="Identify (Shazam)" active={activeTab === "shazam"} onClick={() => setActiveTab("shazam")} />
@@ -1025,6 +1076,31 @@ export default function App() {
             {activeTab === "home" && (
               <motion.div key="home" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-12">
                 
+                {/* Autoscrolling Music Ticker */}
+                <div className="w-full overflow-hidden bg-white/5 border-y border-white/10 py-4 mb-8 -mx-8 px-8 group relative">
+                  <div className="absolute left-0 top-0 bottom-0 w-20 bg-gradient-to-r from-[#070708] to-transparent z-10 pointer-events-none" />
+                  <div className="absolute right-0 top-0 bottom-0 w-20 bg-gradient-to-l from-[#070708] to-transparent z-10 pointer-events-none" />
+                  
+                  <div className="flex animate-marquee whitespace-nowrap gap-24 items-center">
+                    {[...trendingTracks, ...staticTrending2026, ...trendingTracks].slice(0, 40).map((t: any, i: number) => (
+                      <div key={`marquee-${i}`} className="flex items-center gap-6 group/item cursor-pointer" onClick={() => handleSearch(undefined, `${t.author || t.artist} ${t.title}`)}>
+                        <div className="flex items-center gap-3">
+                          <div className="px-2 py-0.5 bg-emerald-500/20 rounded-md text-[8px] font-black text-emerald-400 uppercase tracking-widest border border-emerald-500/30">Subbed</div>
+                          <span className="text-xl font-black italic uppercase tracking-tighter text-white group-hover/item:text-emerald-400 transition-colors">{t.title}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-black uppercase text-white/20 tracking-[0.3em]">Artist</span>
+                          <span className="text-sm font-bold text-emerald-500/60 uppercase">{t.author || t.artist}</span>
+                        </div>
+                        <div className="flex items-center gap-2 px-4 py-1 rounded-full bg-white/5 border border-white/10">
+                           <TrendingUp size={10} className="text-emerald-400" />
+                           <span className="text-[8px] font-black text-white/40 uppercase tracking-widest">{Math.floor(Math.random() * 500) + 100}K Plays</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Search Bar (matches SoundSync design) */}
                 <div className="relative group w-full max-w-2xl mx-auto mb-8">
                   <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-white/30 group-focus-within:text-emerald-400 transition-colors" size={20} />
@@ -1065,10 +1141,10 @@ export default function App() {
                 )}
 
                 {/* Artists & Their Logic - Organized view */}
-                {Array.from(new Set(trendingTracks.filter(t => t.type === 'track').map(t => t.author))).slice(0, 5).map(artistName => {
+                {Array.from(new Set(trendingTracks.filter(t => t.type === 'track').map(t => t.author))).slice(0, 5).map((artistName, sidx) => {
                   const artistTracks = trendingTracks.filter(t => t.author === artistName && t.type === 'track');
                   return (
-                    <section key={artistName} className="space-y-6">
+                    <section key={`${artistName}-${sidx}`} className="space-y-6">
                       <div className="flex items-center justify-between px-2">
                         <div className="flex items-center gap-4">
                            <div className="w-10 h-10 rounded-full mixed-gradient flex items-center justify-center font-black text-xs italic">
@@ -1108,8 +1184,19 @@ export default function App() {
                 <section className="space-y-6">
                    <h2 className="text-4xl font-black italic uppercase tracking-[ -0.05em] text-white px-2">Essential Collections</h2>
                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-                      {trendingTracks.filter(t => t.type === 'album').slice(0, 10).map(album => (
-                        <div key={album.id} onClick={() => handleAlbumClick(album)} className="p-4 bg-white/[0.03] border border-white/10 rounded-[2rem] hover:bg-white/[0.08] transition-all group cursor-pointer hover:-translate-y-2">
+                      {/* Priority to our static trending 2026 data */}
+                      {staticTrending2026.slice(0, 10).map((album, aidx) => (
+                        <div key={`static-trending-${aidx}`} onClick={() => handleSearch(undefined, `${album.artist} ${album.title}`)} className="p-4 bg-emerald-500/5 border border-emerald-500/20 rounded-[2rem] hover:bg-emerald-500/10 transition-all group cursor-pointer hover:-translate-y-2">
+                           <div className="aspect-square rounded-2xl overflow-hidden mb-4 shadow-xl relative">
+                              <img src={`https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400&q=80&sig=${aidx}`} className="w-full h-full object-cover" alt="alb" />
+                              <div className="absolute top-2 right-2 bg-emerald-500 text-black text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">2026</div>
+                           </div>
+                           <h3 className="font-bold text-white text-sm truncate px-1">{album.title}</h3>
+                           <p className="text-[10px] text-white/30 font-black uppercase tracking-widest px-1 mt-1">{album.artist}</p>
+                        </div>
+                      ))}
+                      {trendingTracks.filter(t => t.type === 'album').slice(0, 5).map((album, aidx) => (
+                        <div key={`${album.id}-${aidx}`} onClick={() => handleAlbumClick(album)} className="p-4 bg-white/[0.03] border border-white/10 rounded-[2rem] hover:bg-white/[0.08] transition-all group cursor-pointer hover:-translate-y-2">
                            <div className="aspect-square rounded-2xl overflow-hidden mb-4 shadow-xl">
                               <img src={album.thumbnail} className="w-full h-full object-cover" alt="alb" />
                            </div>
@@ -1133,14 +1220,14 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-8">
                     {[
-                      { id: 27, name: 'Daft Punk', img: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c9484f380a9370f37d50/500x500.jpg' },
-                      { id: 13, name: 'Eminem', img: 'https://e-cdns-images.dzcdn.net/images/artist/19543ad22da6e03946014e5cae285a8a/500x500.jpg' },
-                      { id: 1, name: 'The Beatles', img: 'https://e-cdns-images.dzcdn.net/images/artist/0bf0f45532298c440a77519a868424a7/500x500.jpg' },
-                      { id: 412, name: 'Queen', img: 'https://e-cdns-images.dzcdn.net/images/artist/Queen/500x500.jpg' },
-                      { id: 119, name: 'Metallica', img: 'https://e-cdns-images.dzcdn.net/images/artist/Metallica/500x500.jpg' },
-                      { id: 5092, name: 'Pink Floyd', img: 'https://e-cdns-images.dzcdn.net/images/artist/PinkFloyd/500x500.jpg' },
+                      { id: 'asake', name: 'Asake', img: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=400' },
+                      { id: 'rema', name: 'Rema', img: 'https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400' },
+                      { id: 'burna_boy', name: 'Burna Boy', img: 'https://images.unsplash.com/photo-1514525253361-bee8a187499b?w=400' },
+                      { id: 'ayra_starr', name: 'Ayra Starr', img: 'https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=400' },
+                      { id: 'davido', name: 'Davido', img: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400' },
+                      { id: 'wizkid', name: 'Wizkid', img: 'https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400' },
                       { id: 144227, name: 'Drake', img: 'https://e-cdns-images.dzcdn.net/images/artist/Drake/500x500.jpg' },
-                      { id: 1045, name: 'Coldplay', img: 'https://e-cdns-images.dzcdn.net/images/artist/080df105c973022c6019bd375f928aad/500x500.jpg' }
+                      { id: 27, name: 'Daft Punk', img: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c9484f380a9370f37d50/500x500.jpg' }
                     ].map(art => (
                       <div 
                         key={art.id} 
@@ -2510,120 +2597,158 @@ const ArtistView = ({ artist, loading, onPlay, onAlbum, onDownload }: any) => {
   if (!artist) return null;
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-16">
-      <div className="relative h-[400px] rounded-[4rem] overflow-hidden group shadow-2xl border border-white/10">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-16 pb-32">
+      {/* Hero Section */}
+      <div className="relative h-[500px] rounded-[4rem] overflow-hidden group shadow-2xl border border-white/10">
         {artist.info.picture_xl ? (
-          <img src={artist.info.picture_xl} className="w-full h-full object-cover opacity-60 group-hover:scale-105 transition-transform duration-[10s]" />
+          <img src={artist.info.picture_xl} className="w-full h-full object-cover opacity-70 group-hover:scale-105 transition-transform duration-[10s]" />
         ) : (
           <div className="w-full h-full bg-white/5 flex items-center justify-center"><UserIcon className="text-white/20" size={64} /></div>
         )}
-        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent"></div>
-        <div className="absolute bottom-12 left-12 space-y-4">
-           <div className="flex items-center gap-3">
-              <ShieldCheck className="text-magenta" size={24} />
-              <span className="text-xs font-black uppercase tracking-[0.4em] text-white/60 italic">Verified Artist</span>
+        <div className="absolute inset-0 bg-gradient-to-t from-[#070708] via-[#070708]/60 to-transparent"></div>
+        <div className="absolute bottom-12 left-12 right-12 flex flex-col md:flex-row md:items-end justify-between gap-8">
+           <div className="space-y-4">
+              <div className="flex items-center gap-3">
+                 <ShieldCheck className="text-magenta" size={24} />
+                 <span className="text-xs font-black uppercase tracking-[0.4em] text-white/60 italic">Certified Global Artist</span>
+              </div>
+              <h2 className="text-7xl md:text-9xl font-black uppercase italic tracking-tighter text-white leading-none drop-shadow-2xl">{artist.info.name}</h2>
+              <div className="flex flex-wrap gap-6 items-center">
+                 <div className="flex items-center gap-2">
+                    <Users size={16} className="text-magenta" />
+                    <span className="text-white font-black text-xl italic uppercase tracking-tighter">{artist.info.nb_fan.toLocaleString()} Fans</span>
+                 </div>
+                 <div className="w-1.5 h-1.5 bg-white/20 rounded-full" />
+                 <div className="flex items-center gap-2">
+                    <MusicIcon size={16} className="text-white/40" />
+                    <span className="text-white/40 font-black text-xs uppercase tracking-widest">{artist.albums.length} Total Projects</span>
+                 </div>
+              </div>
            </div>
-           <h2 className="text-8xl font-black uppercase italic tracking-tighter text-white leading-none">{artist.info.name}</h2>
-           <div className="flex gap-6 items-center">
-              <span className="text-white font-black text-xl italic uppercase tracking-tighter">{artist.info.nb_fan.toLocaleString()} Dedicated Fans</span>
-              <div className="w-1.5 h-1.5 bg-magenta rounded-full" />
-              <span className="text-white/40 font-black text-xs uppercase tracking-widest">{artist.albums.length} Full Albums</span>
-           </div>
+           <button onClick={() => { if (artist.tracks?.[0]) onPlay({ id: artist.tracks[0].id, title: artist.tracks[0].title, artist: artist.info.name, cover: artist.tracks[0].album?.cover_medium, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + artist.tracks[0].title + ' official audio')}` }); }} className="px-10 py-5 mixed-gradient text-black font-black uppercase tracking-[0.2em] italic rounded-[2rem] shadow-2xl hover:scale-110 transition-all flex items-center gap-4">
+             <Play fill="black" size={20} /> Shuffle Play
+           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-16">
-         <div className="lg:col-span-2 space-y-10">
-            <div className="flex items-center justify-between">
-              <h3 className="text-3xl font-black italic uppercase tracking-tighter">Popular Tracks</h3>
-              <p className="text-[10px] text-white/30 font-black uppercase tracking-widest">{artist.tracks.length} Anthems</p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-               {artist.tracks.map((t: any, i: number) => (
-                 <div 
-                   key={t.id} 
-                   className="flex items-center gap-4 p-4 bg-white/5 border border-white/5 rounded-[1.8rem] hover:bg-white/10 transition-all group cursor-pointer"
-                 >
-                    <div onClick={() => onPlay({ 
-                      id: t.id, 
-                      title: t.title, 
-                      artist: artist.info.name, 
-                      cover: t.album?.cover_medium, 
-                      url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}`
-                    })} className="flex flex-1 items-center gap-4">
-                      <div className="w-12 h-12 rounded-xl overflow-hidden shrink-0">
-                        {t.album?.cover_small ? (
-                          <img src={t.album?.cover_small} className="w-full h-full object-cover" alt="t" />
-                        ) : (
-                          <div className="w-full h-full bg-white/5 flex items-center justify-center"><MusicIcon className="text-white/20" size={16} /></div>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                         <p className="font-bold text-white italic truncate text-sm uppercase tracking-tight">{t.title}</p>
-                         <p className="text-[10px] text-white/30 uppercase font-black truncate mt-1">{t.album?.title}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                       <button 
-                         onClick={(e) => { e.stopPropagation(); onDownload({ id: t.id, title: t.title, author: artist.info.name, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}`, thumbnail: t.album?.cover_medium, duration: t.duration }, "mp3"); }}
-                         className="p-2 hover:bg-magenta/20 rounded-lg text-white/20 hover:text-magenta transition-all"
-                         title="Download Audio"
-                       >
-                         <Download size={14} />
-                       </button>
-                       <button 
-                         onClick={(e) => { e.stopPropagation(); onDownload({ id: t.id, title: t.title, author: artist.info.name, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}`, thumbnail: t.album?.cover_medium, duration: t.duration }, "mp4"); }}
-                         className="p-2 hover:bg-blue-500/20 rounded-lg text-white/20 hover:text-blue-500 transition-all"
-                         title="Download Video"
-                       >
-                         <VideoIcon size={14} />
-                       </button>
-                       <Play size={14} className="text-white/20 group-hover:text-magenta transition-colors" onClick={() => onPlay({ id: t.id, title: t.title, artist: artist.info.name, cover: t.album?.cover_medium, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}` })} />
-                    </div>
-                 </div>
-               ))}
-            </div>
-         </div>
-         <div className="space-y-10">
-            <div className="p-10 bg-white/5 border border-white/10 rounded-[3rem] space-y-6">
-               <h3 className="text-xs font-black uppercase italic tracking-widest text-magenta">Identity Bio</h3>
-               <p className="text-sm font-bold text-white/60 leading-relaxed italic">{artist.bio || "No official bio available for this entity."}</p>
-               <div className="pt-4 flex flex-wrap gap-2">
-                  {artist.info.genres?.data?.map((g: any) => (
-                    <span key={g.id} className="px-4 py-2 bg-white/5 border border-white/10 text-[9px] uppercase font-black tracking-widest rounded-full text-white/60">{g.name}</span>
-                  )) || ["General", "Artist"].map(g => <span key={g} className="px-4 py-2 bg-white/5 border border-white/10 text-[9px] uppercase font-black tracking-widest rounded-full">{g}</span>)}
-               </div>
-            </div>
+          <div className="lg:col-span-2 space-y-24">
+             {/* Trending Section */}
+             <section className="space-y-10">
+                <div className="flex items-center gap-4">
+                  <TrendingUp className="text-magenta" />
+                  <h3 className="text-4xl font-black italic uppercase tracking-tighter">Trending Anthems</h3>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                   {(artist.trendingTracks || artist.tracks.slice(0, 5)).map((t: any, i: number) => (
+                     <motion.div 
+                       key={t.id} 
+                       initial={{ opacity: 0, y: 10 }}
+                       whileInView={{ opacity: 1, y: 0 }}
+                       viewport={{ once: true }}
+                       className="flex items-center gap-5 p-5 bg-white/[0.03] border border-white/5 rounded-[2rem] hover:bg-white/[0.08] transition-all group cursor-pointer"
+                     >
+                        <div className="text-xs font-black text-white/10 w-8 text-center group-hover:text-magenta">{i + 1}</div>
+                        <div onClick={() => onPlay({ 
+                          id: t.id, 
+                          title: t.title, 
+                          artist: artist.info.name, 
+                          cover: t.album?.cover_medium, 
+                          url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}`
+                        })} className="flex flex-1 items-center gap-5 min-w-0">
+                          <div className="w-14 h-14 rounded-2xl overflow-hidden shrink-0 shadow-lg group-hover:rotate-6 transition-transform">
+                            <img src={t.album?.cover_small || `https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=100`} className="w-full h-full object-cover" alt="t" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                             <p className="font-bold text-white italic truncate text-lg uppercase tracking-tight group-hover:text-magenta transition-colors">{t.title}</p>
+                             <p className="text-[10px] text-white/30 uppercase font-black truncate mt-1 tracking-widest">{t.album?.title}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                           <span className="text-[10px] font-mono text-white/20 hidden md:block">{t.duration || "4:02"}</span>
+                           <button 
+                             onClick={(e) => { e.stopPropagation(); onDownload({ id: t.id, title: t.title, author: artist.info.name, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(artist.info.name + ' ' + t.title + ' official audio')}`, thumbnail: t.album?.cover_medium, duration: t.duration }, "mp3"); }}
+                             className="w-10 h-10 bg-white/5 rounded-full flex items-center justify-center text-white/20 hover:bg-magenta hover:text-black transition-all"
+                           >
+                             <Download size={16} />
+                           </button>
+                        </div>
+                     </motion.div>
+                   ))}
+                </div>
+             </section>
 
-            <div className="space-y-6">
-               <div className="flex items-center justify-between px-2">
-                  <h3 className="text-xs font-black uppercase italic tracking-widest text-white/20">Studio Discography</h3>
-                  <span className="text-[10px] text-white/20 font-black">{artist.albums.length}</span>
-               </div>
-               <div className="grid grid-cols-1 gap-4">
-                  {artist.albums.map((a: any) => (
-                    <div 
-                      key={a.id} 
-                      onClick={() => onAlbum({ id: a.id, title: a.title, thumbnail: a.cover_medium, author: artist.info.name })} 
-                      className="flex items-center gap-4 p-4 bg-white/5 border border-white/5 rounded-2xl hover:border-magenta/40 transition-all cursor-pointer group"
-                    >
-                       <div className="w-14 h-14 rounded-xl overflow-hidden shrink-0">
-                         {a.cover_small ? (
-                           <img src={a.cover_small} className="w-full h-full object-cover" alt="a" />
-                         ) : (
-                           <div className="w-full h-full bg-white/5 flex items-center justify-center"><MusicIcon className="text-white/20" size={12} /></div>
-                         )}
-                       </div>
-                       <div className="flex-1 min-w-0">
-                          <p className="text-xs font-bold text-white truncate uppercase italic">{a.title}</p>
-                          <p className="text-[9px] text-white/40 uppercase font-black mt-1 tracking-widest">{a.release_date.split('-')[0]} • {a.genre_id === 0 ? 'Single' : 'Album'}</p>
-                       </div>
-                       <ChevronRight size={14} className="text-white/10 group-hover:text-magenta transition-colors" />
-                    </div>
-                  ))}
-               </div>
-            </div>
-         </div>
+             {/* Trending Albums */}
+             <section className="space-y-10">
+                <div className="flex items-center gap-4">
+                  <Star className="text-magenta" />
+                  <h3 className="text-4xl font-black italic uppercase tracking-tighter">Essential Projects</h3>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+                   {(artist.trendingAlbums || artist.albums.slice(0, 4)).map((a: any) => (
+                     <div key={a.id} onClick={() => onAlbum({ id: a.id, title: a.title, thumbnail: a.cover_medium, author: artist.info.name })} className="space-y-5 group cursor-pointer">
+                        <div className="aspect-square rounded-[2.5rem] overflow-hidden bg-white/5 border-2 border-white/5 group-hover:border-magenta/40 transition-all relative shadow-2xl">
+                           <img src={a.cover_medium || `https://images.unsplash.com/photo-1514525253361-bee8a187499b?w=400`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt="a" />
+                           <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-6">
+                              <span className="text-[10px] font-black uppercase text-white tracking-[0.3em]">Explore</span>
+                           </div>
+                        </div>
+                        <div className="text-center">
+                           <h4 className="text-sm font-black italic uppercase text-white truncate px-1 group-hover:text-magenta transition-colors">{a.title}</h4>
+                           <p className="text-[9px] font-black uppercase tracking-widest text-white/20 mt-1">{a.release_date?.split('-')[0] || "2026"}</p>
+                        </div>
+                     </div>
+                   ))}
+                </div>
+             </section>
+
+             {/* Full Archives */}
+             <section className="space-y-10 border-t border-white/5 pt-20">
+                <div className="flex items-center justify-between">
+                   <h3 className="text-3xl font-black italic uppercase tracking-tighter text-white/30">Complete Archive</h3>
+                   <span className="px-4 py-1.5 bg-white/5 rounded-full text-[10px] font-black text-white/20 uppercase tracking-widest">{artist.albums.length} Releases</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                   {artist.albums.map((a: any) => (
+                     <div key={a.id} onClick={() => onAlbum({ id: a.id, title: a.title, thumbnail: a.cover_medium, author: artist.info.name })} className="flex items-center gap-5 p-4 rounded-3xl border border-white/5 hover:bg-white/5 transition-all cursor-pointer group">
+                        <div className="w-16 h-16 rounded-2xl overflow-hidden shrink-0">
+                           <img src={a.cover_small || a.cover_medium} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all" alt="a" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                           <p className="text-sm font-black uppercase italic text-white truncate group-hover:text-white transition-colors">{a.title}</p>
+                           <p className="text-[10px] text-white/30 uppercase font-black mt-1">{a.release_date || "Unknown"}</p>
+                        </div>
+                        <ArrowRight size={16} className="text-white/10 group-hover:text-magenta group-hover:translate-x-1 transition-all" />
+                     </div>
+                   ))}
+                </div>
+             </section>
+          </div>
+
+          <div className="space-y-12">
+             {/* Bio Section */}
+             <aside className="p-10 bg-white/5 border border-white/10 rounded-[3.5rem] space-y-10 relative overflow-hidden group sticky top-8">
+                <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-opacity">
+                   <Sparkles size={160} className="text-magenta" />
+                </div>
+                <div className="space-y-6 relative z-10">
+                   <div className="flex items-center gap-3">
+                      <div className="w-2 h-2 bg-magenta rounded-full animate-pulse" />
+                      <h3 className="text-xs font-black uppercase italic tracking-[0.4em] text-magenta">Legacy Narrative</h3>
+                   </div>
+                   <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2 no-scrollbar">
+                      <p className="text-base font-bold text-white/70 leading-relaxed italic first-letter:text-5xl first-letter:font-black first-letter:mr-3 first-letter:float-left first-letter:text-magenta">
+                        {artist.bio || "Crafting an identity through sonic waves, this entity continues to push the boundaries of modern acoustic experiences."}
+                      </p>
+                   </div>
+                   <div className="pt-6 flex flex-wrap gap-2 border-t border-white/5">
+                      {artist.info.genres?.data?.map((g: any) => (
+                        <span key={g.id} className="px-5 py-2.5 bg-magenta/10 border border-magenta/20 text-[9px] font-black uppercase tracking-widest rounded-full text-magenta">{g.name}</span>
+                      )) || ["Experimental", "Visionary"].map(g => <span key={g} className="px-5 py-2.5 bg-white/5 border border-white/10 text-[9px] font-black uppercase tracking-widest rounded-full text-white/40">{g}</span>)}
+                   </div>
+                </div>
+             </aside>
+          </div>
       </div>
     </motion.div>
   );
